@@ -21,10 +21,6 @@ make kind-load-images
 make kind-apply # localhost 접속용
 make local-kind-apply # local.wealist.co.kr 접속용
 
-## 포트포워딩 대신 로컬에 등록해서 wealist.local로
-
-echo "127.0.0.1 local.wealist" | sudo tee -a /etc/hosts
-
 ## 그 외
 
 kind get clusters (클러스터 확인)
