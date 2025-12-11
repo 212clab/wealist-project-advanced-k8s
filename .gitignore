@@ -113,5 +113,5 @@ terraform/dev/*
 *.ipr
 
 # Google OAuth Client ID 값 들어간 Secret 전부 무시
-k8s/base/shared/secret.yaml
+k8s/base/shared/secret-shared.yaml
 services/auth-service/k8s/base/secret.yaml
