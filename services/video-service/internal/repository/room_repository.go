@@ -16,6 +16,7 @@ type RoomRepository interface {
 	Delete(id uuid.UUID) error
 	AddParticipant(participant *domain.RoomParticipant) error
 	RemoveParticipant(roomID, userID uuid.UUID) error
+	UpdateParticipant(participant *domain.RoomParticipant) error
 	GetParticipant(roomID, userID uuid.UUID) (*domain.RoomParticipant, error)
 	GetActiveParticipants(roomID uuid.UUID) ([]domain.RoomParticipant, error)
 	GetAllParticipants(roomID uuid.UUID) ([]domain.RoomParticipant, error)
@@ -94,6 +95,10 @@ func (r *roomRepository) RemoveParticipant(roomID, userID uuid.UUID) error {
 			"is_active": false,
 			"left_at":   gorm.Expr("NOW()"),
 		}).Error
+}
+
+func (r *roomRepository) UpdateParticipant(participant *domain.RoomParticipant) error {
+	return r.db.Save(participant).Error
 }
 
 func (r *roomRepository) GetParticipant(roomID, userID uuid.UUID) (*domain.RoomParticipant, error) {

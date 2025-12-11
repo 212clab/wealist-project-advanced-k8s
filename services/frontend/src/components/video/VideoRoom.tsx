@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  X,
   Mic,
   MicOff,
   Video,
@@ -18,9 +17,21 @@ import {
   Captions,
   CaptionsOff,
   FlipHorizontal,
-  Sparkles,
 } from 'lucide-react';
-import { VideoRoom as VideoRoomType, videoService } from '../../api/videoService';
+import { VideoRoom as VideoRoomType } from '../../api/videoService';
+import {
+  Room,
+  RoomEvent,
+  VideoPresets,
+  Track,
+  LocalParticipant,
+  RemoteParticipant,
+  RemoteTrack,
+  RemoteTrackPublication,
+  Participant,
+  DataPacket_Kind,
+  LocalTrackPublication,
+} from 'livekit-client';
 
 // Display mode types
 type DisplayMode = 'full' | 'mini';
@@ -40,18 +51,7 @@ interface VideoRoomProps {
 }
 
 // LiveKit connection state types
-type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error';
-
-interface Participant {
-  identity: string;
-  name?: string;
-  isSpeaking: boolean;
-  isMuted: boolean;
-  isVideoEnabled: boolean;
-  isLocal: boolean;
-  videoTrack?: MediaStreamTrack;
-  audioTrack?: MediaStreamTrack;
-}
+type ConnectionState = 'connecting' | 'connected' | 'disconnected' | 'error' | 'reconnecting';
 
 interface ChatMessage {
   id: string;
@@ -70,7 +70,7 @@ interface TranscriptLine {
   isFinal: boolean;
 }
 
-// Web Speech API type declarations
+// Web Speech API type declarations (Keeping this for subtitles)
 interface SpeechRecognitionEvent {
   results: SpeechRecognitionResultList;
   resultIndex: number;
@@ -113,23 +113,55 @@ declare global {
   }
 }
 
+// Helper component to render video track
+const VideoTrackRenderer: React.FC<{ track?: Track | null; isLocal: boolean; isMirrored: boolean }> = ({
+  track,
+  isLocal,
+  isMirrored,
+}) => {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    const el = videoRef.current;
+    if (el && track) {
+      track.attach(el);
+      return () => {
+        track.detach(el);
+      };
+    }
+  }, [track]);
+
+  if (!track) return <div className="w-full h-full bg-gray-800 flex items-center justify-center text-gray-500">카메라 꺼짐</div>;
+
+  return (
+    <video
+      ref={videoRef}
+      className="w-full h-full object-cover"
+      style={{ transform: isLocal && isMirrored ? 'scaleX(-1)' : 'none' }}
+    />
+  );
+};
+
 export const VideoRoom: React.FC<VideoRoomProps> = ({
-  room,
+  room: roomInfo,
   token,
   wsUrl,
   onLeave,
-  userProfile,
+  userProfile: _userProfile,
 }) => {
+  const [room, setRoom] = useState<Room | null>(null);
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
   const [participants, setParticipants] = useState<Participant[]>([]);
+
+  // Local state
   const [isMuted, setIsMuted] = useState(false);
-  const [isVideoEnabled, setIsVideoEnabled] = useState(false); // 기본적으로 카메라 OFF
+  const [isVideoEnabled, setIsVideoEnabled] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
-  const [isMirrored, setIsMirrored] = useState(true); // 기본적으로 좌우 반전 활성화 (셀피 모드)
-  const [isBlurEnabled, setIsBlurEnabled] = useState(false); // 배경 흐림 효과
+  const [isMirrored, setIsMirrored] = useState(true);
+  const [_isBlurEnabled, _setIsBlurEnabled] = useState(false); // Not implemented with real SDK yet
   const [showParticipants, setShowParticipants] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [error, _setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   // Chat state
   const [showChat, setShowChat] = useState(false);
@@ -139,274 +171,234 @@ export const VideoRoom: React.FC<VideoRoomProps> = ({
 
   // Mini mode state
   const [displayMode, setDisplayMode] = useState<DisplayMode>('full');
-  const [miniPosition, setMiniPosition] = useState({ x: 20, y: 20 }); // bottom-right offset
+  const [miniPosition, setMiniPosition] = useState({ x: 20, y: 20 });
   const [isDragging, setIsDragging] = useState(false);
   const dragOffsetRef = useRef({ x: 0, y: 0 });
 
   // Subtitle/Transcript state
   const [isSubtitleEnabled, setIsSubtitleEnabled] = useState(false);
   const [currentSubtitle, setCurrentSubtitle] = useState('');
-  const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
+  const [_transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
 
   // Join notification state
   const [joinNotification, setJoinNotification] = useState<string | null>(null);
-  const previousParticipantIds = useRef<Set<string>>(new Set());
 
-  const localVideoRef = useRef<HTMLVideoElement>(null);
-  const localStreamRef = useRef<MediaStream | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
   const miniContainerRef = useRef<HTMLDivElement>(null);
 
-  // Initialize local media
+  // Initialize Room
   useEffect(() => {
-    const initLocalMedia = async () => {
-      try {
-        // 오디오만 먼저 요청 (카메라는 사용자가 켤 때 요청)
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: false,
-          audio: true,
-        });
-        localStreamRef.current = stream;
+    const newRoom = new Room({
+      adaptiveStream: true,
+      dynacast: true,
+      videoCaptureDefaults: {
+        resolution: VideoPresets.h720.resolution,
+      },
+    });
 
-        // Add local participant (카메라 OFF 상태로 시작)
-        setParticipants([
-          {
-            identity: 'local',
-            name: userProfile?.nickName || '나',
-            isSpeaking: false,
-            isMuted: false,
-            isVideoEnabled: false,
-            isLocal: true,
-            videoTrack: undefined,
-            audioTrack: stream.getAudioTracks()[0],
-          },
-        ]);
-
-        // Connect to LiveKit (simplified - real implementation would use livekit-client SDK)
-        connectToRoom();
-      } catch (err) {
-        console.error('Failed to get audio:', err);
-        // 오디오 없이도 참여 가능하도록 함
-        setParticipants([
-          {
-            identity: 'local',
-            name: userProfile?.nickName || '나',
-            isSpeaking: false,
-            isMuted: true,
-            isVideoEnabled: false,
-            isLocal: true,
-            videoTrack: undefined,
-            audioTrack: undefined,
-          },
-        ]);
-        setIsMuted(true);
-        connectToRoom();
-      }
-    };
-
-    initLocalMedia();
+    setRoom(newRoom);
 
     return () => {
-      // Cleanup
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach((track) => track.stop());
-      }
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
+      newRoom.disconnect();
     };
   }, []);
 
-  // 참여자 입장 알림 표시
-  const showJoinNotification = useCallback((name: string) => {
-    setJoinNotification(`${name}님이 참여하셨습니다`);
-    setTimeout(() => {
-      setJoinNotification(null);
-    }, 3000);
-  }, []);
-
-  // 참여자 목록 갱신
-  const refreshParticipants = useCallback(async () => {
-    try {
-      const roomParticipants = await videoService.getParticipants(room.id);
-      const activeParticipants = roomParticipants.filter((p) => p.isActive);
-
-      // 새로운 참여자 확인 (로컬 제외)
-      const currentIds = new Set(activeParticipants.map((p) => p.id));
-      activeParticipants.forEach((p) => {
-        if (!previousParticipantIds.current.has(p.id) && p.userId !== userProfile?.id) {
-          // userId의 앞 6자리만 표시
-          const shortName = `사용자 ${p.userId.slice(0, 6)}`;
-          showJoinNotification(shortName);
-        }
-      });
-      previousParticipantIds.current = currentIds;
-
-      // 참여자 목록 업데이트 (로컬 참여자 유지)
-      setParticipants((prev) => {
-        const localParticipant = prev.find((p) => p.isLocal);
-        const remoteParticipants: Participant[] = activeParticipants
-          .filter((p) => p.userId !== userProfile?.id)
-          .map((p) => ({
-            identity: p.id,
-            name: `참여자 ${p.userId.slice(0, 6)}`,
-            isSpeaking: false,
-            isMuted: false,
-            isVideoEnabled: false,
-            isLocal: false,
-            videoTrack: undefined,
-            audioTrack: undefined,
-          }));
-
-        return localParticipant ? [localParticipant, ...remoteParticipants] : remoteParticipants;
-      });
-    } catch (error) {
-      console.error('Failed to refresh participants:', error);
-    }
-  }, [room.id, userProfile?.id, showJoinNotification]);
-
-  const connectToRoom = useCallback(() => {
-    setConnectionState('connecting');
-
-    // 연결 성공 후 참여자 폴링 시작
-    setTimeout(() => {
-      setConnectionState('connected');
-      // 초기 참여자 목록 로드
-      refreshParticipants();
-    }, 1500);
-  }, [token, wsUrl, refreshParticipants]);
-
-  // 참여자 목록 주기적 갱신 (3초마다)
+  // Connect to LiveKit
   useEffect(() => {
-    if (connectionState !== 'connected') return;
+    if (!room || !token || !wsUrl) return;
 
-    const interval = setInterval(() => {
-      refreshParticipants();
-    }, 3000);
-
-    return () => clearInterval(interval);
-  }, [connectionState, refreshParticipants]);
-
-  const toggleMute = () => {
-    if (localStreamRef.current) {
-      const audioTrack = localStreamRef.current.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = isMuted;
-        setIsMuted(!isMuted);
-        setParticipants((prev) => prev.map((p) => (p.isLocal ? { ...p, isMuted: !isMuted } : p)));
-      }
-    }
-  };
-
-  const toggleVideo = async () => {
-    if (!isVideoEnabled) {
-      // 카메라 켜기: 비디오 트랙이 없으면 새로 요청
+    const connect = async () => {
       try {
-        const videoStream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: false,
-        });
-        const videoTrack = videoStream.getVideoTracks()[0];
+        await room.connect(wsUrl, token);
+        setConnectionState('connected');
+        updateParticipants();
 
-        // 기존 스트림에 비디오 트랙 추가
-        if (localStreamRef.current) {
-          localStreamRef.current.addTrack(videoTrack);
-        } else {
-          localStreamRef.current = videoStream;
+        // Publish initial state (Audio default on if available, Video off)
+        // Note: Browser policy might require user interaction, but we'll try
+        try {
+          await room.localParticipant.setMicrophoneEnabled(true);
+          setIsMuted(false);
+        } catch (e) {
+          console.warn("Autoplay policy prevented microphone connect", e);
+          setIsMuted(true);
         }
 
-        // 비디오 엘리먼트에 스트림 연결
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = localStreamRef.current;
-        }
-
-        setIsVideoEnabled(true);
-        setParticipants((prev) =>
-          prev.map((p) => (p.isLocal ? { ...p, isVideoEnabled: true, videoTrack } : p)),
-        );
-      } catch (err) {
-        console.error('Failed to enable video:', err);
-        alert('카메라 접근에 실패했습니다. 권한을 확인해주세요.');
+      } catch (e) {
+        console.error('Failed to connect', e);
+        setConnectionState('error');
+        setError(e instanceof Error ? e.message : 'Connection failed');
       }
-    } else {
-      // 카메라 끄기
-      if (localStreamRef.current) {
-        const videoTrack = localStreamRef.current.getVideoTracks()[0];
-        if (videoTrack) {
-          videoTrack.stop();
-          localStreamRef.current.removeTrack(videoTrack);
-        }
-      }
-      setIsVideoEnabled(false);
-      setParticipants((prev) =>
-        prev.map((p) => (p.isLocal ? { ...p, isVideoEnabled: false, videoTrack: undefined } : p)),
-      );
+    };
+
+    connect();
+
+    // Event listeners
+    const onParticipantConnected = (participant: RemoteParticipant) => {
+      setJoinNotification(`${participant.identity}님이 참여하셨습니다`); // identity as fallback, better to use name if available
+      setTimeout(() => setJoinNotification(null), 3000);
+      updateParticipants();
+    };
+
+    const onParticipantDisconnected = (_participant: RemoteParticipant) => {
+      updateParticipants();
+    };
+
+    const onTrackSubscribed = (
+      _track: RemoteTrack,
+      _publication: RemoteTrackPublication,
+      _participant: RemoteParticipant
+    ) => {
+      updateParticipants(); // Trigger re-render to show video
+    };
+
+    const onTrackUnsubscribed = (
+      _track: RemoteTrack,
+      _publication: RemoteTrackPublication,
+      _participant: RemoteParticipant
+    ) => {
+      updateParticipants();
+    };
+
+    const onLocalTrackPublished = (
+      _publication: LocalTrackPublication,
+      _participant: LocalParticipant
+    ) => {
+      updateParticipants();
     }
-  };
 
-  const toggleScreenShare = async () => {
-    if (!isScreenSharing) {
+    const onLocalTrackUnpublished = (
+      _publication: LocalTrackPublication,
+      _participant: LocalParticipant
+    ) => {
+      updateParticipants();
+    }
+
+    const onDataReceived = (payload: Uint8Array, participant?: RemoteParticipant, _kind?: DataPacket_Kind) => {
+      const str = new TextDecoder().decode(payload);
       try {
-        const screenStream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-        });
-        // Handle screen share (simplified)
-        setIsScreenSharing(true);
-        screenStream.getVideoTracks()[0].onended = () => {
-          setIsScreenSharing(false);
-        };
-      } catch (err) {
-        console.error('Screen share failed:', err);
+        const data = JSON.parse(str);
+        if (data.type === 'chat') {
+          const newMessage: ChatMessage = {
+            id: Date.now().toString() + Math.random(),
+            sender: participant?.identity || 'Anonymous',
+            senderName: participant?.name || participant?.identity || 'Anonymous',
+            message: data.message,
+            timestamp: new Date(),
+            isLocal: false,
+          };
+          setChatMessages(prev => [...prev, newMessage]);
+        }
+      } catch (e) {
+        console.error("Failed to parse data message", e);
       }
-    } else {
+    };
+
+    const onActiveSpeakersChanged = (_speakers: Participant[]) => {
+      updateParticipants(); // Re-render to show speaking indicator if needed
+    }
+
+    room.on(RoomEvent.ParticipantConnected, onParticipantConnected);
+    room.on(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
+    room.on(RoomEvent.TrackSubscribed, onTrackSubscribed);
+    room.on(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed);
+    room.on(RoomEvent.LocalTrackPublished, onLocalTrackPublished);
+    room.on(RoomEvent.LocalTrackUnpublished, onLocalTrackUnpublished);
+    room.on(RoomEvent.DataReceived, onDataReceived);
+    room.on(RoomEvent.ActiveSpeakersChanged, onActiveSpeakersChanged);
+
+    // Also listed to mute/unmute events for UI updates
+    room.on(RoomEvent.TrackMuted, updateParticipants);
+    room.on(RoomEvent.TrackUnmuted, updateParticipants);
+
+
+    return () => {
+      room.off(RoomEvent.ParticipantConnected, onParticipantConnected);
+      room.off(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
+      room.off(RoomEvent.TrackSubscribed, onTrackSubscribed);
+      room.off(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed);
+      room.off(RoomEvent.LocalTrackPublished, onLocalTrackPublished);
+      room.off(RoomEvent.LocalTrackUnpublished, onLocalTrackUnpublished);
+      room.off(RoomEvent.DataReceived, onDataReceived);
+      room.off(RoomEvent.ActiveSpeakersChanged, onActiveSpeakersChanged);
+      room.on(RoomEvent.TrackMuted, updateParticipants);
+      room.on(RoomEvent.TrackUnmuted, updateParticipants);
+    };
+
+  }, [room, token, wsUrl]);
+
+  const updateParticipants = useCallback(() => {
+    if (!room) return;
+    const remotes = Array.from(room.remoteParticipants.values());
+    setParticipants([room.localParticipant, ...remotes]);
+  }, [room]);
+
+
+  const toggleMute = useCallback(async () => {
+    if (!room) return;
+    // const enable = !isMuted; 
+
+    try {
+      await room.localParticipant.setMicrophoneEnabled(isMuted);
+      setIsMuted(!isMuted);
+    } catch (e) {
+      console.error("Failed to toggle mute", e);
+    }
+  }, [room, isMuted]);
+
+  const toggleVideo = useCallback(async () => {
+    if (!room) return;
+    try {
+      await room.localParticipant.setCameraEnabled(!isVideoEnabled);
+      setIsVideoEnabled(!isVideoEnabled);
+    } catch (e) {
+      console.error("Failed to toggle video", e);
+    }
+  }, [room, isVideoEnabled]);
+
+  const toggleScreenShare = useCallback(async () => {
+    if (!room) return;
+    try {
+      await room.localParticipant.setScreenShareEnabled(!isScreenSharing);
+      setIsScreenSharing(!isScreenSharing);
+    } catch (e) {
+      console.error("Failed to toggle screen share", e);
       setIsScreenSharing(false);
     }
-  };
+  }, [room, isScreenSharing]);
 
-  const handleLeave = async () => {
-    // Save transcript if there's content
-    if (transcript.length > 0) {
-      try {
-        const transcriptText = getTranscriptText();
-        await videoService.saveTranscript(room.id, transcriptText);
-        console.log('Transcript saved successfully');
-      } catch (error) {
-        console.error('Failed to save transcript:', error);
-        // Continue with leave even if transcript save fails
-      }
-    }
-
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((track) => track.stop());
-    }
+  const handleLeave = useCallback(() => {
+    room?.disconnect();
     onLeave();
-  };
-
-  const copyRoomLink = () => {
-    navigator.clipboard.writeText(`${window.location.origin}/video/${room.id}`);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
+  }, [room, onLeave]);
 
   // Chat functions
-  const sendChatMessage = () => {
-    if (!chatInput.trim()) return;
+  const sendChatMessage = useCallback(async () => {
+    if (!chatInput.trim() || !room) return;
 
-    const newMessage: ChatMessage = {
-      id: Date.now().toString(),
-      sender: 'local',
-      senderName: '나',
-      message: chatInput.trim(),
-      timestamp: new Date(),
-      isLocal: true,
+    const msgData = {
+      type: 'chat',
+      message: chatInput.trim()
     };
 
-    setChatMessages((prev) => [...prev, newMessage]);
-    setChatInput('');
+    try {
+      const strData = JSON.stringify(msgData);
+      const encoder = new TextEncoder();
+      await room.localParticipant.publishData(encoder.encode(strData), { reliable: true });
 
-    // In real implementation, send via LiveKit DataChannel
-  };
+      const newMessage: ChatMessage = {
+        id: Date.now().toString(),
+        sender: room.localParticipant.identity,
+        senderName: room.localParticipant.name || '나',
+        message: chatInput.trim(),
+        timestamp: new Date(),
+        isLocal: true,
+      };
+      setChatMessages((prev) => [...prev, newMessage]);
+      setChatInput('');
+    } catch (e) {
+      console.error("Failed to send message", e);
+    }
+  }, [chatInput, room]);
 
   const handleChatKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -426,7 +418,14 @@ export const VideoRoom: React.FC<VideoRoomProps> = ({
     return date.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
   };
 
-  // Speech Recognition (Subtitle) functions
+  const copyRoomLink = () => {
+    navigator.clipboard.writeText(`${window.location.origin}/video/${roomInfo.id}`);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  // Speech Recognition (Subtitle) functions - Keeping logic but needs audio stream source updates ideally
+  // For now, we'll keep the browser Native Speech API as it uses the physical mic independently of WebRTC
   const startSpeechRecognition = useCallback(() => {
     const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognitionAPI) {
@@ -452,10 +451,8 @@ export const VideoRoom: React.FC<VideoRoomProps> = ({
         }
       }
 
-      // Update current subtitle (shows interim results)
       setCurrentSubtitle(interimTranscript || finalTranscript);
 
-      // Add final transcript to history
       if (finalTranscript) {
         const newLine: TranscriptLine = {
           id: Date.now().toString(),
@@ -465,18 +462,11 @@ export const VideoRoom: React.FC<VideoRoomProps> = ({
           isFinal: true,
         };
         setTranscript((prev) => [...prev, newLine]);
-
-        // Clear current subtitle after adding to transcript
         setTimeout(() => setCurrentSubtitle(''), 100);
       }
     };
 
-    recognition.onerror = (event) => {
-      console.error('Speech recognition error:', event);
-    };
-
     recognition.onend = () => {
-      // Restart if still enabled
       if (isSubtitleEnabled && recognitionRef.current) {
         try {
           recognitionRef.current.start();
@@ -492,7 +482,7 @@ export const VideoRoom: React.FC<VideoRoomProps> = ({
 
   const stopSpeechRecognition = useCallback(() => {
     if (recognitionRef.current) {
-      recognitionRef.current.onend = null; // Prevent restart
+      recognitionRef.current.onend = null;
       recognitionRef.current.stop();
       recognitionRef.current = null;
     }
@@ -508,7 +498,6 @@ export const VideoRoom: React.FC<VideoRoomProps> = ({
     setIsSubtitleEnabled(!isSubtitleEnabled);
   };
 
-  // Cleanup speech recognition on unmount
   useEffect(() => {
     return () => {
       if (recognitionRef.current) {
@@ -517,13 +506,6 @@ export const VideoRoom: React.FC<VideoRoomProps> = ({
       }
     };
   }, []);
-
-  // Get full transcript as text for download
-  const getTranscriptText = () => {
-    return transcript
-      .map((line) => `[${formatChatTime(line.timestamp)}] ${line.speaker}: ${line.text}`)
-      .join('\n');
-  };
 
   const toggleDisplayMode = () => {
     setDisplayMode((prev) => (prev === 'full' ? 'mini' : 'full'));
@@ -554,11 +536,9 @@ export const VideoRoom: React.FC<VideoRoomProps> = ({
       const containerWidth = container.offsetWidth;
       const containerHeight = container.offsetHeight;
 
-      // Calculate new position (from bottom-right)
       let newX = window.innerWidth - e.clientX - containerWidth + dragOffsetRef.current.x;
       let newY = window.innerHeight - e.clientY - containerHeight + dragOffsetRef.current.y;
 
-      // Clamp to window bounds
       newX = Math.max(0, Math.min(newX, window.innerWidth - containerWidth));
       newY = Math.max(0, Math.min(newY, window.innerHeight - containerHeight));
 
@@ -596,11 +576,26 @@ export const VideoRoom: React.FC<VideoRoomProps> = ({
     );
   }
 
-  // Mini mode rendering
+  // Helper to get video track
+  const getParticipantVideoTrack = (p: Participant) => {
+    const pub = p.getTrackPublication(Track.Source.Camera);
+    if (pub && pub.isSubscribed && pub.track) {
+      return pub.track;
+    }
+    // For local participant, track is available even if not 'subscribed' in remote sense
+    if (p instanceof LocalParticipant) {
+      const localPub = p.getTrackPublication(Track.Source.Camera);
+      return localPub?.track;
+    }
+    return null;
+  };
+
   if (displayMode === 'mini') {
+    const localP = room?.localParticipant;
+    const localVideoTrack = localP ? getParticipantVideoTrack(localP) : null;
+
     return (
       <>
-        {/* 참여자 입장 알림 (미니 모드) */}
         {joinNotification && (
           <div className="fixed top-4 right-4 z-[60] animate-fade-in">
             <div className="bg-green-500 text-white px-3 py-1.5 rounded-lg shadow-lg flex items-center gap-2">
@@ -620,7 +615,6 @@ export const VideoRoom: React.FC<VideoRoomProps> = ({
             cursor: isDragging ? 'grabbing' : 'default',
           }}
         >
-          {/* Mini mode header - draggable */}
           <div
             className="flex items-center justify-between px-3 py-2 bg-gray-800 cursor-grab active:cursor-grabbing"
             onMouseDown={handleDragStart}
@@ -628,15 +622,14 @@ export const VideoRoom: React.FC<VideoRoomProps> = ({
             <div className="flex items-center gap-2 flex-1">
               <GripHorizontal className="w-4 h-4 text-gray-500" />
               <div
-                className={`w-2 h-2 rounded-full ${
-                  connectionState === 'connected'
+                className={`w-2 h-2 rounded-full ${connectionState === 'connected'
                     ? 'bg-green-500'
                     : connectionState === 'connecting'
-                    ? 'bg-yellow-500 animate-pulse'
-                    : 'bg-red-500'
-                }`}
+                      ? 'bg-yellow-500 animate-pulse'
+                      : 'bg-red-500'
+                  }`}
               />
-              <span className="text-white text-sm font-medium truncate flex-1">{room.name}</span>
+              <span className="text-white text-sm font-medium truncate flex-1">{roomInfo.name}</span>
             </div>
             <button
               onClick={toggleDisplayMode}
@@ -647,77 +640,42 @@ export const VideoRoom: React.FC<VideoRoomProps> = ({
             </button>
           </div>
 
-          {/* Mini video view */}
           <div className="relative flex-1" style={{ height: 'calc(100% - 88px)' }}>
-            <video
-              ref={localVideoRef}
-              autoPlay
-              muted
-              playsInline
-              className={`w-full h-full object-cover ${!isVideoEnabled ? 'hidden' : ''}`}
-              style={{
-                transform: isMirrored ? 'scaleX(-1)' : 'none',
-                filter: isBlurEnabled ? 'blur(0px)' : 'none',
-              }}
+            <VideoTrackRenderer
+              track={localVideoTrack}
+              isLocal={true}
+              isMirrored={isMirrored}
             />
-            {/* 배경 흐림 효과 오버레이 (간단 버전) */}
-            {isBlurEnabled && isVideoEnabled && (
-              <div
-                className="absolute inset-0 pointer-events-none"
-                style={{
-                  backdropFilter: 'blur(8px)',
-                  WebkitBackdropFilter: 'blur(8px)',
-                  maskImage:
-                    'radial-gradient(ellipse 40% 60% at 50% 40%, transparent 30%, black 70%)',
-                  WebkitMaskImage:
-                    'radial-gradient(ellipse 40% 60% at 50% 40%, transparent 30%, black 70%)',
-                }}
-              />
-            )}
-            {!isVideoEnabled && (
+            {(!localVideoTrack) && (
               <div className="absolute inset-0 flex items-center justify-center bg-gray-800">
-                {userProfile?.profileImageUrl ? (
-                  <img
-                    src={userProfile.profileImageUrl}
-                    alt={userProfile.nickName}
-                    className="w-16 h-16 rounded-full object-cover border-2 border-gray-600"
-                  />
-                ) : (
-                  <div className="w-16 h-16 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-xl font-bold text-white border-2 border-gray-600">
-                    {userProfile?.nickName?.[0]?.toUpperCase() || '나'}
-                  </div>
-                )}
+                <div className="w-16 h-16 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-xl font-bold text-white border-2 border-gray-600">
+                  {localP?.name?.[0]?.toUpperCase() || '나'}
+                </div>
               </div>
             )}
-            {/* Participant count badge */}
             <div className="absolute top-2 right-2 px-2 py-1 bg-black/50 rounded-full flex items-center gap-1">
               <Users className="w-3 h-3 text-white" />
               <span className="text-white text-xs">{participants.length}</span>
             </div>
           </div>
 
-          {/* Mini controls */}
           <div className="flex items-center justify-center gap-2 py-2 bg-gray-800">
             <button
               onClick={toggleMute}
-              className={`p-2 rounded-full transition ${
-                isMuted
+              className={`p-2 rounded-full transition ${isMuted
                   ? 'bg-red-500 hover:bg-red-600 text-white'
                   : 'bg-gray-700 hover:bg-gray-600 text-white'
-              }`}
-              title={isMuted ? '마이크 켜기' : '마이크 끄기'}
+                }`}
             >
               {isMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
             </button>
 
             <button
               onClick={toggleVideo}
-              className={`p-2 rounded-full transition ${
-                !isVideoEnabled
+              className={`p-2 rounded-full transition ${!isVideoEnabled
                   ? 'bg-red-500 hover:bg-red-600 text-white'
                   : 'bg-gray-700 hover:bg-gray-600 text-white'
-              }`}
-              title={isVideoEnabled ? '카메라 끄기' : '카메라 켜기'}
+                }`}
             >
               {isVideoEnabled ? <Video className="w-4 h-4" /> : <VideoOff className="w-4 h-4" />}
             </button>
@@ -725,7 +683,6 @@ export const VideoRoom: React.FC<VideoRoomProps> = ({
             <button
               onClick={handleLeave}
               className="p-2 rounded-full bg-red-500 hover:bg-red-600 text-white transition"
-              title="통화 종료"
             >
               <PhoneOff className="w-4 h-4" />
             </button>
@@ -735,10 +692,9 @@ export const VideoRoom: React.FC<VideoRoomProps> = ({
     );
   }
 
-  // Full mode rendering
+  // Full Mode
   return (
     <div className="fixed inset-0 bg-gray-900 z-50 flex flex-col">
-      {/* 참여자 입장 알림 */}
       {joinNotification && (
         <div className="absolute top-16 right-4 z-50 animate-fade-in">
           <div className="bg-green-500 text-white px-4 py-2 rounded-lg shadow-lg flex items-center gap-2">
@@ -752,15 +708,14 @@ export const VideoRoom: React.FC<VideoRoomProps> = ({
       <div className="flex items-center justify-between px-4 py-3 bg-gray-800">
         <div className="flex items-center gap-3">
           <div
-            className={`w-3 h-3 rounded-full ${
-              connectionState === 'connected'
+            className={`w-3 h-3 rounded-full ${connectionState === 'connected'
                 ? 'bg-green-500'
                 : connectionState === 'connecting'
-                ? 'bg-yellow-500 animate-pulse'
-                : 'bg-red-500'
-            }`}
+                  ? 'bg-yellow-500 animate-pulse'
+                  : 'bg-red-500'
+              }`}
           />
-          <h1 className="text-white font-medium">{room.name}</h1>
+          <h1 className="text-white font-medium">{roomInfo.name}</h1>
           <span className="text-gray-400 text-sm">({participants.length}명 참여중)</span>
         </div>
         <div className="flex items-center gap-2">
@@ -780,321 +735,245 @@ export const VideoRoom: React.FC<VideoRoomProps> = ({
           </button>
           <button
             onClick={() => setShowParticipants(!showParticipants)}
-            className={`p-2 rounded-lg transition ${
-              showParticipants
+            className={`p-2 rounded-lg transition ${showParticipants
                 ? 'bg-blue-600 text-white'
                 : 'bg-gray-700 hover:bg-gray-600 text-white'
-            }`}
-            title="참여자"
+              }`}
           >
             <Users className="w-5 h-5" />
           </button>
           <button
             onClick={() => setShowChat(!showChat)}
-            className={`p-2 rounded-lg transition relative ${
-              showChat ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-white'
-            }`}
-            title="채팅"
+            className={`p-2 rounded-lg transition relative ${showChat ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600 text-white'
+              }`}
           >
             <MessageSquare className="w-5 h-5" />
-            {chatMessages.length > 0 && !showChat && (
-              <div className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 rounded-full text-xs flex items-center justify-center">
-                {chatMessages.length > 9 ? '9+' : chatMessages.length}
-              </div>
-            )}
+            {/* Unread badge could be added here */}
           </button>
         </div>
       </div>
 
-      {/* Video Grid */}
-      <div className="flex-1 p-4 overflow-hidden flex gap-4">
-        <div
-          className={`flex-1 grid gap-4 ${
-            participants.length === 1
-              ? 'grid-cols-1'
-              : participants.length <= 4
-              ? 'grid-cols-2'
-              : participants.length <= 9
-              ? 'grid-cols-3'
-              : 'grid-cols-4'
-          }`}
-        >
-          {participants.map((participant) => (
-            <div
-              key={participant.identity}
-              className={`relative bg-gray-800 rounded-xl overflow-hidden ${
-                participant.isSpeaking ? 'ring-2 ring-green-500' : ''
-              }`}
-            >
-              {participant.isLocal ? (
-                <>
-                  <video
-                    ref={localVideoRef}
-                    autoPlay
-                    muted
-                    playsInline
-                    className={`w-full h-full object-cover ${
-                      !participant.isVideoEnabled ? 'hidden' : ''
-                    }`}
-                    style={{ transform: isMirrored ? 'scaleX(-1)' : 'none' }}
-                  />
-                  {/* 배경 흐림 효과 오버레이 */}
-                  {isBlurEnabled && participant.isVideoEnabled && (
-                    <div
-                      className="absolute inset-0 pointer-events-none"
-                      style={{
-                        backdropFilter: 'blur(10px)',
-                        WebkitBackdropFilter: 'blur(10px)',
-                        maskImage:
-                          'radial-gradient(ellipse 35% 50% at 50% 35%, transparent 40%, black 80%)',
-                        WebkitMaskImage:
-                          'radial-gradient(ellipse 35% 50% at 50% 35%, transparent 40%, black 80%)',
-                      }}
-                    />
-                  )}
-                </>
-              ) : (
-                <div className="w-full h-full flex items-center justify-center">
-                  {/* Remote video would go here */}
-                  <div className="w-20 h-20 rounded-full bg-gray-700 flex items-center justify-center text-2xl font-bold text-white">
-                    {participant.name?.[0]?.toUpperCase() || '?'}
-                  </div>
-                </div>
-              )}
+      {/* Main Content Area */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Video Grid */}
+        <div className="flex-1 p-4 overflow-y-auto">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 auto-rows-max">
+            {participants.map((p) => {
+              const isLocal = p.identity === room?.localParticipant?.identity;
+              const videoTrack = getParticipantVideoTrack(p);
+              // Check if audio is muted
+              const isAudioMuted = p.getTrackPublication(Track.Source.Microphone)?.isMuted ?? true;
 
-              {!participant.isVideoEnabled && (
-                <div className="absolute inset-0 flex items-center justify-center bg-gray-800">
-                  {participant.isLocal && userProfile?.profileImageUrl ? (
-                    <img
-                      src={userProfile.profileImageUrl}
-                      alt={userProfile.nickName}
-                      className="w-24 h-24 rounded-full object-cover border-4 border-gray-600"
-                    />
-                  ) : (
-                    <div className="w-24 h-24 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-3xl font-bold text-white border-4 border-gray-600">
-                      {participant.name?.[0]?.toUpperCase() || '?'}
+              return (
+                <div key={p.identity} className="relative aspect-video bg-gray-800 rounded-xl overflow-hidden shadow-lg border border-gray-700">
+                  <VideoTrackRenderer track={videoTrack} isLocal={isLocal} isMirrored={isLocal && isMirrored} />
+
+                  {/* Status Overlay */}
+                  <div className="absolute bottom-3 left-3 flex items-center gap-2 bg-black/60 px-3 py-1.5 rounded-full backdrop-blur-sm">
+                    <span className="text-white text-sm font-medium">{p.name || p.identity} {isLocal && '(나)'}</span>
+                    {isAudioMuted ? (
+                      <MicOff className="w-3 h-3 text-red-400" />
+                    ) : (
+                      <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                    )}
+                  </div>
+
+                  {/* Avatar when no video */}
+                  {(!videoTrack) && (
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <div className="w-20 h-20 rounded-full bg-gradient-to-br from-gray-600 to-gray-700 flex items-center justify-center text-2xl font-bold text-white border-4 border-gray-600">
+                        {p.name?.[0]?.toUpperCase() || p.identity?.[0]?.toUpperCase()}
+                      </div>
                     </div>
                   )}
                 </div>
-              )}
-
-              {/* Participant info overlay */}
-              <div className="absolute bottom-0 left-0 right-0 p-2 bg-gradient-to-t from-black/70 to-transparent">
-                <div className="flex items-center justify-between">
-                  <span className="text-white text-sm font-medium">
-                    {participant.name || participant.identity}
-                    {participant.isLocal && ' (나)'}
-                  </span>
-                  <div className="flex items-center gap-1">
-                    {participant.isMuted && <MicOff className="w-4 h-4 text-red-500" />}
-                  </div>
-                </div>
-              </div>
-            </div>
-          ))}
+              )
+            })}
+          </div>
         </div>
 
-        {/* Participants Sidebar */}
-        {showParticipants && (
-          <div className="w-64 bg-gray-800 rounded-xl p-4">
-            <h3 className="text-white font-medium mb-3">참여자</h3>
-            <div className="space-y-2">
-              {participants.map((p) => (
-                <div
-                  key={p.identity}
-                  className="flex items-center gap-3 px-3 py-2 bg-gray-700/50 rounded-lg"
-                >
-                  <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white text-sm font-medium">
-                    {p.name?.[0]?.toUpperCase() || '?'}
-                  </div>
-                  <span className="text-white text-sm flex-1">
-                    {p.name || p.identity}
-                    {p.isLocal && ' (나)'}
-                  </span>
-                  <div className="flex items-center gap-1">
-                    {p.isMuted ? (
-                      <MicOff className="w-4 h-4 text-red-500" />
-                    ) : (
-                      <Mic className="w-4 h-4 text-gray-400" />
-                    )}
-                    {p.isVideoEnabled ? (
-                      <Video className="w-4 h-4 text-gray-400" />
-                    ) : (
-                      <VideoOff className="w-4 h-4 text-red-500" />
-                    )}
-                  </div>
+        {/* Right Sidebar (Chat/Participants) */}
+        {(showParticipants || showChat) && (
+          <div className="w-80 bg-gray-800 border-l border-gray-700 flex flex-col transition-all duration-300">
+            {showParticipants && (
+              <div className={`flex-1 flex flex-col ${showChat ? 'h-1/2 border-b border-gray-700' : 'h-full'}`}>
+                <div className="p-4 border-b border-gray-700 bg-gray-800/50">
+                  <h3 className="text-white font-medium flex items-center gap-2">
+                    <Users className="w-4 h-4" />
+                    참여자 ({participants.length})
+                  </h3>
                 </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Chat Sidebar */}
-        {showChat && (
-          <div className="w-80 bg-gray-800 rounded-xl flex flex-col">
-            <div className="p-3 border-b border-gray-700 flex items-center justify-between">
-              <h3 className="text-white font-medium">채팅</h3>
-              <button
-                onClick={() => setShowChat(false)}
-                className="p-1 rounded hover:bg-gray-700 text-gray-400 transition"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Messages */}
-            <div className="flex-1 overflow-y-auto p-3 space-y-3">
-              {chatMessages.length === 0 ? (
-                <div className="text-center text-gray-500 text-sm py-8">
-                  <MessageSquare className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                  <p>채팅을 시작해보세요</p>
+                <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                  {participants.map((p) => (
+                    <div key={p.identity} className="flex items-center justify-between p-2 rounded-lg hover:bg-gray-700/50">
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white text-sm font-medium">
+                          {p.name?.[0] || p.identity?.[0]}
+                        </div>
+                        <div>
+                          <p className="text-sm text-white font-medium">
+                            {p.name || p.identity}
+                            {p.identity === room?.localParticipant?.identity && <span className="text-gray-400 ml-1">(나)</span>}
+                          </p>
+                          <p className="text-xs text-gray-400">
+                            {p.getTrackPublication(Track.Source.Microphone)?.isMuted ? '음소거됨' : '대화 중'}
+                          </p>
+                        </div>
+                      </div>
+                      {p.getTrackPublication(Track.Source.Microphone)?.isMuted ? (
+                        <MicOff className="w-4 h-4 text-gray-500" />
+                      ) : (
+                        <Mic className="w-4 h-4 text-green-500" />
+                      )}
+                    </div>
+                  ))}
                 </div>
-              ) : (
-                chatMessages.map((msg) => (
-                  <div
-                    key={msg.id}
-                    className={`flex flex-col ${msg.isLocal ? 'items-end' : 'items-start'}`}
-                  >
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-xs text-gray-400">{msg.senderName}</span>
-                      <span className="text-xs text-gray-500">{formatChatTime(msg.timestamp)}</span>
-                    </div>
-                    <div
-                      className={`max-w-[80%] px-3 py-2 rounded-lg text-sm ${
-                        msg.isLocal ? 'bg-blue-600 text-white' : 'bg-gray-700 text-white'
-                      }`}
-                    >
-                      {msg.message}
-                    </div>
-                  </div>
-                ))
-              )}
-              <div ref={chatEndRef} />
-            </div>
-
-            {/* Input */}
-            <div className="p-3 border-t border-gray-700">
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  onKeyPress={handleChatKeyPress}
-                  placeholder="메시지 입력..."
-                  className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-                <button
-                  onClick={sendChatMessage}
-                  disabled={!chatInput.trim()}
-                  className="p-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 disabled:cursor-not-allowed rounded-lg text-white transition"
-                >
-                  <Send className="w-5 h-5" />
-                </button>
               </div>
-            </div>
+            )}
+
+            {showChat && (
+              <div className={`flex-1 flex flex-col ${showParticipants ? 'h-1/2' : 'h-full'}`}>
+                <div className="p-4 border-b border-gray-700 bg-gray-800/50">
+                  <h3 className="text-white font-medium flex items-center gap-2">
+                    <MessageSquare className="w-4 h-4" />
+                    채팅
+                  </h3>
+                </div>
+                <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                  {chatMessages.map((msg) => (
+                    <div
+                      key={msg.id}
+                      className={`flex flex-col ${msg.isLocal ? 'items-end' : 'items-start'}`}
+                    >
+                      <div className="flex items-baseline gap-2 mb-1">
+                        <span className="text-xs text-gray-300 font-medium">{msg.senderName}</span>
+                        <span className="text-[10px] text-gray-500">{formatChatTime(msg.timestamp)}</span>
+                      </div>
+                      <div
+                        className={`px-3 py-2 rounded-lg text-sm max-w-[85%] break-words ${msg.isLocal
+                            ? 'bg-blue-600 text-white rounded-br-none'
+                            : 'bg-gray-700 text-gray-100 rounded-bl-none'
+                          }`}
+                      >
+                        {msg.message}
+                      </div>
+                    </div>
+                  ))}
+                  <div ref={chatEndRef} />
+                </div>
+                <div className="p-4 bg-gray-800 border-t border-gray-700">
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      onKeyDown={handleChatKeyPress}
+                      placeholder="메시지를 입력하세요..."
+                      className="flex-1 bg-gray-700 text-white placeholder-gray-400 px-4 py-2 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                    />
+                    <button
+                      onClick={sendChatMessage}
+                      disabled={!chatInput.trim()}
+                      className="p-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <Send className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
 
-      {/* Subtitle Overlay */}
-      {currentSubtitle && (
-        <div className="absolute bottom-24 left-1/2 transform -translate-x-1/2 max-w-[80%]">
-          <div className="bg-black/80 text-white px-4 py-2 rounded-lg text-lg text-center">
+      {/* Subtitles Overlay */}
+      {isSubtitleEnabled && currentSubtitle && (
+        <div className="absolute bottom-24 left-1/2 transform -translate-x-1/2 z-50 animate-fade-in-up">
+          <div className="bg-black/70 backdrop-blur-md px-6 py-3 rounded-2xl text-white text-lg font-medium shadow-xl text-center max-w-2xl">
             {currentSubtitle}
           </div>
         </div>
       )}
 
-      {/* Controls */}
-      <div className="flex items-center justify-center gap-4 py-4 bg-gray-800">
-        <button
-          onClick={toggleMute}
-          className={`p-4 rounded-full transition ${
-            isMuted
-              ? 'bg-red-500 hover:bg-red-600 text-white'
-              : 'bg-gray-700 hover:bg-gray-600 text-white'
-          }`}
-          title={isMuted ? '마이크 켜기' : '마이크 끄기'}
-        >
-          {isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
-        </button>
+      {/* Footer Controls */}
+      <div className="h-20 bg-gray-800 border-t border-gray-700 px-4 flex items-center justify-between">
+        <div className="flex items-center gap-4 text-white">
+          <span className="text-xl font-bold tracking-tight">{new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}</span>
+          <div className="h-8 w-px bg-gray-600" />
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-gray-300 truncate max-w-[200px]">{roomInfo.name}</span>
+          </div>
+        </div>
 
-        <button
-          onClick={toggleVideo}
-          className={`p-4 rounded-full transition ${
-            !isVideoEnabled
-              ? 'bg-red-500 hover:bg-red-600 text-white'
-              : 'bg-gray-700 hover:bg-gray-600 text-white'
-          }`}
-          title={isVideoEnabled ? '카메라 끄기' : '카메라 켜기'}
-        >
-          {isVideoEnabled ? <Video className="w-6 h-6" /> : <VideoOff className="w-6 h-6" />}
-        </button>
+        <div className="flex items-center gap-3 absolute left-1/2 transform -translate-x-1/2">
+          <button
+            onClick={toggleMute}
+            className={`p-3 rounded-full transition duration-200 transform hover:scale-105 ${isMuted
+                ? 'bg-red-500 hover:bg-red-600 text-white shadow-lg shadow-red-500/20'
+                : 'bg-gray-700 hover:bg-gray-600 text-white'
+              }`}
+            title={isMuted ? '마이크 켜기' : '마이크 끄기'}
+          >
+            {isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
+          </button>
 
-        <button
-          onClick={toggleScreenShare}
-          className={`p-4 rounded-full transition ${
-            isScreenSharing
-              ? 'bg-blue-500 hover:bg-blue-600 text-white'
-              : 'bg-gray-700 hover:bg-gray-600 text-white'
-          }`}
-          title={isScreenSharing ? '화면 공유 중지' : '화면 공유'}
-        >
-          <Monitor className="w-6 h-6" />
-        </button>
+          <button
+            onClick={toggleVideo}
+            className={`p-3 rounded-full transition duration-200 transform hover:scale-105 ${!isVideoEnabled
+                ? 'bg-red-500 hover:bg-red-600 text-white shadow-lg shadow-red-500/20'
+                : 'bg-gray-700 hover:bg-gray-600 text-white'
+              }`}
+            title={isVideoEnabled ? '카메라 끄기' : '카메라 켜기'}
+          >
+            {isVideoEnabled ? <Video className="w-6 h-6" /> : <VideoOff className="w-6 h-6" />}
+          </button>
 
-        <button
-          onClick={toggleSubtitle}
-          className={`p-4 rounded-full transition ${
-            isSubtitleEnabled
-              ? 'bg-yellow-500 hover:bg-yellow-600 text-white'
-              : 'bg-gray-700 hover:bg-gray-600 text-white'
-          }`}
-          title={isSubtitleEnabled ? '자막 끄기' : '자막 켜기 (음성인식)'}
-        >
-          {isSubtitleEnabled ? (
-            <Captions className="w-6 h-6" />
-          ) : (
-            <CaptionsOff className="w-6 h-6" />
-          )}
-        </button>
+          <button
+            onClick={toggleScreenShare}
+            className={`p-3 rounded-full transition duration-200 transform hover:scale-105 ${isScreenSharing
+                ? 'bg-green-500 hover:bg-green-600 text-white shadow-lg shadow-green-500/20'
+                : 'bg-gray-700 hover:bg-gray-600 text-white'
+              }`}
+            title="화면 공유"
+          >
+            <Monitor className="w-6 h-6" />
+          </button>
 
-        {/* 좌우 반전 (미러) 버튼 */}
-        <button
-          onClick={() => setIsMirrored(!isMirrored)}
-          className={`p-4 rounded-full transition ${
-            isMirrored
-              ? 'bg-purple-500 hover:bg-purple-600 text-white'
-              : 'bg-gray-700 hover:bg-gray-600 text-white'
-          }`}
-          title={isMirrored ? '좌우 반전 끄기' : '좌우 반전 켜기'}
-        >
-          <FlipHorizontal className="w-6 h-6" />
-        </button>
+          <button
+            onClick={toggleSubtitle}
+            className={`p-3 rounded-full transition duration-200 transform hover:scale-105 ${isSubtitleEnabled
+                ? 'bg-purple-500 hover:bg-purple-600 text-white shadow-lg shadow-purple-500/20'
+                : 'bg-gray-700 hover:bg-gray-600 text-white'
+              }`}
+            title="자막"
+          >
+            {isSubtitleEnabled ? <Captions className="w-6 h-6" /> : <CaptionsOff className="w-6 h-6" />}
+          </button>
 
-        {/* 배경 흐림 버튼 */}
-        <button
-          onClick={() => setIsBlurEnabled(!isBlurEnabled)}
-          className={`p-4 rounded-full transition ${
-            isBlurEnabled
-              ? 'bg-pink-500 hover:bg-pink-600 text-white'
-              : 'bg-gray-700 hover:bg-gray-600 text-white'
-          }`}
-          title={isBlurEnabled ? '배경 흐림 끄기' : '배경 흐림 켜기'}
-        >
-          <Sparkles className="w-6 h-6" />
-        </button>
+          <button
+            onClick={() => setIsMirrored(!isMirrored)}
+            className={`p-3 rounded-full transition duration-200 transform hover:scale-105 ${isMirrored
+                ? 'bg-blue-500 hover:bg-blue-600 text-white shadow-lg shadow-blue-500/20'
+                : 'bg-gray-700 hover:bg-gray-600 text-white'
+              }`}
+            title="좌우 반전"
+          >
+            <FlipHorizontal className="w-6 h-6" />
+          </button>
 
-        <button
-          onClick={handleLeave}
-          className="p-4 rounded-full bg-red-500 hover:bg-red-600 text-white transition"
-          title="통화 종료"
-        >
-          <PhoneOff className="w-6 h-6" />
-        </button>
+          <button
+            onClick={handleLeave}
+            className="p-3 rounded-full bg-red-500 hover:bg-red-600 text-white shadow-lg shadow-red-500/20 transition duration-200 transform hover:scale-105 ml-4"
+            title="통화 종료"
+          >
+            <PhoneOff className="w-6 h-6" />
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {/* Right side spacer or additional controls */}
+        </div>
       </div>
     </div>
   );
 };
-
-export default VideoRoom;

@@ -194,14 +194,22 @@ func (s *roomService) JoinRoom(ctx context.Context, roomID, userID uuid.UUID, us
 		}
 	}
 
-	// Check if user is already in room
+	// Check if user is already in room record (even if inactive)
 	existingParticipant, _ := s.roomRepo.GetParticipant(roomID, userID)
 	if existingParticipant != nil {
-		// User is already in room - just generate a new token for rejoin
+		// User is rejoining room
 		s.logger.Info("User rejoining room",
 			zap.String("room_id", roomID.String()),
 			zap.String("user_id", userID.String()),
 		)
+		existingParticipant.IsActive = true
+		existingParticipant.LeftAt = nil    // Clear leftAt since they are back
+		existingParticipant.Name = userName // Update name
+
+		if err := s.roomRepo.UpdateParticipant(existingParticipant); err != nil {
+			return nil, fmt.Errorf("failed to update participant: %w", err)
+		}
+
 	} else {
 		// New participant - check room capacity
 		count, err := s.roomRepo.CountActiveParticipants(roomID)
@@ -217,6 +225,7 @@ func (s *roomService) JoinRoom(ctx context.Context, roomID, userID uuid.UUID, us
 			RoomID:   roomID,
 			UserID:   userID,
 			IsActive: true,
+			Name:     userName,
 		}
 		if err := s.roomRepo.AddParticipant(participant); err != nil {
 			return nil, fmt.Errorf("failed to add participant: %w", err)
@@ -240,8 +249,20 @@ func (s *roomService) JoinRoom(ctx context.Context, roomID, userID uuid.UUID, us
 }
 
 func (s *roomService) LeaveRoom(ctx context.Context, roomID, userID uuid.UUID) error {
-	// Check if user is in room
-	_, err := s.roomRepo.GetParticipant(roomID, userID)
+	// First check if room exists and get details (for creator check)
+	room, err := s.roomRepo.GetByID(roomID)
+	if err != nil {
+		return ErrRoomNotFound
+	}
+
+	// If the user leaving is the creator, End the room
+	if room.CreatorID == userID {
+		s.logger.Info("Creator leaving room, ending room", zap.String("room_id", roomID.String()))
+		return s.EndRoom(ctx, roomID, userID)
+	}
+
+	// Normal check if user is in room
+	_, err = s.roomRepo.GetParticipant(roomID, userID)
 	if err != nil {
 		return ErrNotInRoom
 	}
@@ -250,23 +271,20 @@ func (s *roomService) LeaveRoom(ctx context.Context, roomID, userID uuid.UUID) e
 		return fmt.Errorf("failed to remove participant: %w", err)
 	}
 
-	// Check if room is empty and close it
+	// Check if room is empty and close it (secondary check)
 	count, _ := s.roomRepo.CountActiveParticipants(roomID)
 	if count == 0 {
-		room, _ := s.roomRepo.GetByID(roomID)
-		if room != nil {
-			room.IsActive = false
-			s.roomRepo.Update(room)
+		room.IsActive = false
+		s.roomRepo.Update(room)
 
-			// Create call history
-			s.createCallHistory(room)
+		// Create call history
+		s.createCallHistory(room)
 
-			// Delete room from LiveKit
-			if s.lkClient != nil {
-				s.lkClient.DeleteRoom(ctx, &livekit.DeleteRoomRequest{
-					Room: room.ID.String(),
-				})
-			}
+		// Delete room from LiveKit
+		if s.lkClient != nil {
+			s.lkClient.DeleteRoom(ctx, &livekit.DeleteRoomRequest{
+				Room: room.ID.String(),
+			})
 		}
 	}
 
@@ -313,6 +331,7 @@ func (s *roomService) GetParticipants(ctx context.Context, roomID uuid.UUID) ([]
 		responses[i] = domain.ParticipantResponse{
 			ID:       p.ID.String(),
 			UserID:   p.UserID.String(),
+			Name:     p.Name,
 			JoinedAt: p.JoinedAt,
 			LeftAt:   p.LeftAt,
 			IsActive: p.IsActive,
@@ -359,6 +378,37 @@ func (s *roomService) createCallHistory(room *domain.Room) {
 	startedAt := room.CreatedAt
 	durationSeconds := int(endedAt.Sub(startedAt).Seconds())
 
+	// Deduplication Logic: Group by UserID
+	type UserStats struct {
+		JoinedAt time.Time
+		LeftAt   time.Time
+	}
+	userStatsMap := make(map[uuid.UUID]UserStats)
+
+	for _, p := range participants {
+		leftAt := endedAt
+		if p.LeftAt != nil {
+			leftAt = *p.LeftAt
+		}
+
+		stats, exists := userStatsMap[p.UserID]
+		if !exists {
+			userStatsMap[p.UserID] = UserStats{
+				JoinedAt: p.JoinedAt,
+				LeftAt:   leftAt,
+			}
+		} else {
+			// If already exists, take the earliest join and latest leave
+			if p.JoinedAt.Before(stats.JoinedAt) {
+				stats.JoinedAt = p.JoinedAt
+			}
+			if leftAt.After(stats.LeftAt) {
+				stats.LeftAt = leftAt
+			}
+			userStatsMap[p.UserID] = stats
+		}
+	}
+
 	// Create call history
 	history := &domain.CallHistory{
 		RoomID:            room.ID,
@@ -369,25 +419,22 @@ func (s *roomService) createCallHistory(room *domain.Room) {
 		EndedAt:           endedAt,
 		DurationSeconds:   durationSeconds,
 		MaxParticipants:   room.MaxParticipants,
-		TotalParticipants: len(participants),
+		TotalParticipants: len(userStatsMap),
 	}
 
-	// Add participant records
-	historyParticipants := make([]domain.CallHistoryParticipant, len(participants))
-	for i, p := range participants {
-		leftAt := p.LeftAt
-		if leftAt == nil {
-			leftAt = &endedAt
-		}
-		participantDuration := int(leftAt.Sub(p.JoinedAt).Seconds())
+	// Create CallHistoryParticipant list from map
+	historyParticipants := make([]domain.CallHistoryParticipant, 0, len(userStatsMap))
+	for uid, stats := range userStatsMap {
+		participantDuration := int(stats.LeftAt.Sub(stats.JoinedAt).Seconds())
 
-		historyParticipants[i] = domain.CallHistoryParticipant{
-			UserID:          p.UserID,
-			JoinedAt:        p.JoinedAt,
-			LeftAt:          *leftAt,
+		historyParticipants = append(historyParticipants, domain.CallHistoryParticipant{
+			UserID:          uid,
+			JoinedAt:        stats.JoinedAt,
+			LeftAt:          stats.LeftAt,
 			DurationSeconds: participantDuration,
-		}
+		})
 	}
+
 	history.Participants = historyParticipants
 
 	if err := s.roomRepo.CreateCallHistory(history); err != nil {
@@ -399,7 +446,7 @@ func (s *roomService) createCallHistory(room *domain.Room) {
 		zap.String("room_id", room.ID.String()),
 		zap.String("room_name", room.Name),
 		zap.Int("duration_seconds", durationSeconds),
-		zap.Int("total_participants", len(participants)),
+		zap.Int("total_participants", len(historyParticipants)),
 	)
 }
 

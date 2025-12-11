@@ -15,6 +15,7 @@
   "dependencies": {
     "@react-oauth/google": "^0.12.2",
     "axios": "^1.13.2",
+    "livekit-client": "^2.16.0",
     "lucide-react": "^0.545.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
@@ -36,7 +37,7 @@
   },
   "pnpm": {
     "overrides": {
-      "esbuild": "0.25.12" 
+      "esbuild": "0.25.12"
     }
   }
 }

@@ -9,15 +9,15 @@ import (
 
 // Room represents a video call room
 type Room struct {
-	ID          uuid.UUID      `gorm:"type:uuid;primary_key" json:"id"`
-	Name        string         `gorm:"size:255;not null" json:"name"`
-	WorkspaceID uuid.UUID      `gorm:"type:uuid;not null;index" json:"workspaceId"`
-	CreatorID   uuid.UUID      `gorm:"type:uuid;not null" json:"creatorId"`
-	MaxParticipants int        `gorm:"default:10" json:"maxParticipants"`
-	IsActive    bool           `gorm:"default:true" json:"isActive"`
-	CreatedAt   time.Time      `json:"createdAt"`
-	UpdatedAt   time.Time      `json:"updatedAt"`
-	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
+	ID              uuid.UUID      `gorm:"type:uuid;primary_key" json:"id"`
+	Name            string         `gorm:"size:255;not null" json:"name"`
+	WorkspaceID     uuid.UUID      `gorm:"type:uuid;not null;index" json:"workspaceId"`
+	CreatorID       uuid.UUID      `gorm:"type:uuid;not null" json:"creatorId"`
+	MaxParticipants int            `gorm:"default:10" json:"maxParticipants"`
+	IsActive        bool           `gorm:"default:true" json:"isActive"`
+	CreatedAt       time.Time      `json:"createdAt"`
+	UpdatedAt       time.Time      `json:"updatedAt"`
+	DeletedAt       gorm.DeletedAt `gorm:"index" json:"-"`
 
 	// Relations
 	Participants []RoomParticipant `gorm:"foreignKey:RoomID" json:"participants,omitempty"`
@@ -35,6 +35,7 @@ type RoomParticipant struct {
 	ID        uuid.UUID      `gorm:"type:uuid;primary_key" json:"id"`
 	RoomID    uuid.UUID      `gorm:"type:uuid;not null;index" json:"roomId"`
 	UserID    uuid.UUID      `gorm:"type:uuid;not null;index" json:"userId"`
+	Name      string         `gorm:"size:255" json:"name"`
 	JoinedAt  time.Time      `json:"joinedAt"`
 	LeftAt    *time.Time     `json:"leftAt,omitempty"`
 	IsActive  bool           `gorm:"default:true" json:"isActive"`
@@ -65,46 +66,47 @@ type JoinRoomRequest struct {
 }
 
 type RoomResponse struct {
-	ID              string                `json:"id"`
-	Name            string                `json:"name"`
-	WorkspaceID     string                `json:"workspaceId"`
-	CreatorID       string                `json:"creatorId"`
-	MaxParticipants int                   `json:"maxParticipants"`
-	IsActive        bool                  `json:"isActive"`
-	ParticipantCount int                  `json:"participantCount"`
-	Participants    []ParticipantResponse `json:"participants,omitempty"`
-	CreatedAt       time.Time             `json:"createdAt"`
-	UpdatedAt       time.Time             `json:"updatedAt"`
+	ID               string                `json:"id"`
+	Name             string                `json:"name"`
+	WorkspaceID      string                `json:"workspaceId"`
+	CreatorID        string                `json:"creatorId"`
+	MaxParticipants  int                   `json:"maxParticipants"`
+	IsActive         bool                  `json:"isActive"`
+	ParticipantCount int                   `json:"participantCount"`
+	Participants     []ParticipantResponse `json:"participants,omitempty"`
+	CreatedAt        time.Time             `json:"createdAt"`
+	UpdatedAt        time.Time             `json:"updatedAt"`
 }
 
 type ParticipantResponse struct {
 	ID       string     `json:"id"`
 	UserID   string     `json:"userId"`
+	Name     string     `json:"name"`
 	JoinedAt time.Time  `json:"joinedAt"`
 	LeftAt   *time.Time `json:"leftAt,omitempty"`
 	IsActive bool       `json:"isActive"`
 }
 
 type JoinRoomResponse struct {
-	Room     RoomResponse `json:"room"`
-	Token    string       `json:"token"`
-	WSUrl    string       `json:"wsUrl"`
+	Room  RoomResponse `json:"room"`
+	Token string       `json:"token"`
+	WSUrl string       `json:"wsUrl"`
 }
 
 // CallHistory represents a completed video call record
 type CallHistory struct {
-	ID              uuid.UUID      `gorm:"type:uuid;primary_key" json:"id"`
-	RoomID          uuid.UUID      `gorm:"type:uuid;not null;index" json:"roomId"`
-	RoomName        string         `gorm:"size:255;not null" json:"roomName"`
-	WorkspaceID     uuid.UUID      `gorm:"type:uuid;not null;index" json:"workspaceId"`
-	CreatorID       uuid.UUID      `gorm:"type:uuid;not null" json:"creatorId"`
-	StartedAt       time.Time      `json:"startedAt"`
-	EndedAt         time.Time      `json:"endedAt"`
-	DurationSeconds int            `json:"durationSeconds"`
-	MaxParticipants int            `json:"maxParticipants"`
-	TotalParticipants int          `json:"totalParticipants"`
-	CreatedAt       time.Time      `json:"createdAt"`
-	DeletedAt       gorm.DeletedAt `gorm:"index" json:"-"`
+	ID                uuid.UUID      `gorm:"type:uuid;primary_key" json:"id"`
+	RoomID            uuid.UUID      `gorm:"type:uuid;not null;index" json:"roomId"`
+	RoomName          string         `gorm:"size:255;not null" json:"roomName"`
+	WorkspaceID       uuid.UUID      `gorm:"type:uuid;not null;index" json:"workspaceId"`
+	CreatorID         uuid.UUID      `gorm:"type:uuid;not null" json:"creatorId"`
+	StartedAt         time.Time      `json:"startedAt"`
+	EndedAt           time.Time      `json:"endedAt"`
+	DurationSeconds   int            `json:"durationSeconds"`
+	MaxParticipants   int            `json:"maxParticipants"`
+	TotalParticipants int            `json:"totalParticipants"`
+	CreatedAt         time.Time      `json:"createdAt"`
+	DeletedAt         gorm.DeletedAt `gorm:"index" json:"-"`
 
 	// Participants who joined this call
 	Participants []CallHistoryParticipant `gorm:"foreignKey:CallHistoryID" json:"participants,omitempty"`
@@ -119,13 +121,13 @@ func (ch *CallHistory) BeforeCreate(tx *gorm.DB) error {
 
 // CallHistoryParticipant represents a participant in a completed call
 type CallHistoryParticipant struct {
-	ID            uuid.UUID      `gorm:"type:uuid;primary_key" json:"id"`
-	CallHistoryID uuid.UUID      `gorm:"type:uuid;not null;index" json:"callHistoryId"`
-	UserID        uuid.UUID      `gorm:"type:uuid;not null;index" json:"userId"`
-	JoinedAt      time.Time      `json:"joinedAt"`
-	LeftAt        time.Time      `json:"leftAt"`
-	DurationSeconds int          `json:"durationSeconds"`
-	CreatedAt     time.Time      `json:"createdAt"`
+	ID              uuid.UUID `gorm:"type:uuid;primary_key" json:"id"`
+	CallHistoryID   uuid.UUID `gorm:"type:uuid;not null;index" json:"callHistoryId"`
+	UserID          uuid.UUID `gorm:"type:uuid;not null;index" json:"userId"`
+	JoinedAt        time.Time `json:"joinedAt"`
+	LeftAt          time.Time `json:"leftAt"`
+	DurationSeconds int       `json:"durationSeconds"`
+	CreatedAt       time.Time `json:"createdAt"`
 }
 
 func (chp *CallHistoryParticipant) BeforeCreate(tx *gorm.DB) error {
@@ -137,14 +139,14 @@ func (chp *CallHistoryParticipant) BeforeCreate(tx *gorm.DB) error {
 
 // CallHistoryResponse represents call history for API response
 type CallHistoryResponse struct {
-	ID                string                        `json:"id"`
-	RoomName          string                        `json:"roomName"`
-	WorkspaceID       string                        `json:"workspaceId"`
-	CreatorID         string                        `json:"creatorId"`
-	StartedAt         time.Time                     `json:"startedAt"`
-	EndedAt           time.Time                     `json:"endedAt"`
-	DurationSeconds   int                           `json:"durationSeconds"`
-	TotalParticipants int                           `json:"totalParticipants"`
+	ID                string                           `json:"id"`
+	RoomName          string                           `json:"roomName"`
+	WorkspaceID       string                           `json:"workspaceId"`
+	CreatorID         string                           `json:"creatorId"`
+	StartedAt         time.Time                        `json:"startedAt"`
+	EndedAt           time.Time                        `json:"endedAt"`
+	DurationSeconds   int                              `json:"durationSeconds"`
+	TotalParticipants int                              `json:"totalParticipants"`
 	Participants      []CallHistoryParticipantResponse `json:"participants,omitempty"`
 }
 
@@ -157,12 +159,12 @@ type CallHistoryParticipantResponse struct {
 
 // CallTranscript represents the transcript/subtitles of a video call
 type CallTranscript struct {
-	ID            uuid.UUID      `gorm:"type:uuid;primary_key" json:"id"`
-	CallHistoryID uuid.UUID      `gorm:"type:uuid;not null;uniqueIndex" json:"callHistoryId"`
-	RoomID        uuid.UUID      `gorm:"type:uuid;not null;index" json:"roomId"`
-	Content       string         `gorm:"type:text" json:"content"`
-	CreatedAt     time.Time      `json:"createdAt"`
-	UpdatedAt     time.Time      `json:"updatedAt"`
+	ID            uuid.UUID `gorm:"type:uuid;primary_key" json:"id"`
+	CallHistoryID uuid.UUID `gorm:"type:uuid;not null;uniqueIndex" json:"callHistoryId"`
+	RoomID        uuid.UUID `gorm:"type:uuid;not null;index" json:"roomId"`
+	Content       string    `gorm:"type:text" json:"content"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
 func (ct *CallTranscript) BeforeCreate(tx *gorm.DB) error {
@@ -231,6 +233,7 @@ func (r *Room) ToResponse() RoomResponse {
 			participants = append(participants, ParticipantResponse{
 				ID:       p.ID.String(),
 				UserID:   p.UserID.String(),
+				Name:     p.Name,
 				JoinedAt: p.JoinedAt,
 				LeftAt:   p.LeftAt,
 				IsActive: p.IsActive,
