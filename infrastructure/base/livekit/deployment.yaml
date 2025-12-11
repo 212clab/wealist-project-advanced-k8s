@@ -16,6 +16,11 @@ spec:
         app: livekit
         tier: infrastructure
     spec:
+      # 1. hostNetwork와 dnsPolicy는 spec 바로 아래에 위치해야 합니다.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      
+      # 2. 컨테이너 정의는 반드시 'containers' 리스트 아래에 와야 합니다.
       containers:
         - name: livekit
           image: livekit/livekit-server:v1.5
@@ -32,6 +37,13 @@ spec:
             - containerPort: 7881
               protocol: TCP
               name: rtc-tcp
+            # LiveKit은 보통 UDP 포트도 필요합니다. 필요 시 아래 주석 해제하여 사용하세요.
+            # - containerPort: 7881
+            #   protocol: UDP
+            #   name: rtc-udp
+            # - containerPort: 7882
+            #   protocol: UDP
+            #   name: turn-udp
           volumeMounts:
             - name: config
               mountPath: /etc/livekit.yaml
