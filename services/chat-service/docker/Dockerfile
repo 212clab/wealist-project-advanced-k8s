@@ -8,27 +8,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 # Set working directory to project root
 WORKDIR /workspace
 
-# Copy go workspace file
-COPY go.work go.work.sum* ./
-
-# Copy shared package
+# Copy shared package first
 COPY packages/wealist-advanced-go-pkg/ ./packages/wealist-advanced-go-pkg/
 
-# Copy service go.mod files first (for layer caching)
-COPY services/chat-service/go.mod services/chat-service/go.sum ./services/chat-service/
-
-# Download dependencies with cache mount
+# Copy service files
 WORKDIR /workspace/services/chat-service
+COPY services/chat-service/go.mod services/chat-service/go.sum ./
+
+# Add replace directive for local package
+RUN echo 'replace github.com/OrangesCloud/wealist-advanced-go-pkg => ../../packages/wealist-advanced-go-pkg' >> go.mod
+
+# Download dependencies with cache mount (use GOWORK=off to ignore go.work)
 RUN --mount=type=cache,target=/go/pkg/mod \
-    go mod download
+    GOWORK=off go mod download
 
 # Copy service source code
 COPY services/chat-service/ ./
 
-# Build with cache mount (dramatically speeds up incremental builds)
+# Build with cache mount (use GOWORK=off)
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o chat-api ./cmd/api
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOWORK=off go build -ldflags="-w -s" -o chat-api ./cmd/api
 
 # Runtime stage
 FROM alpine:latest
