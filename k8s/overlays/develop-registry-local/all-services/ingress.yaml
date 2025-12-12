@@ -17,10 +17,6 @@ metadata:
     nginx.ingress.kubernetes.io/upstream-hash-by: "$request_uri"
     # SSL/TLS settings
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    # WebSocket upgrade headers (핵심!)
-    nginx.ingress.kubernetes.io/configuration-snippet: |
-      proxy_set_header Upgrade $http_upgrade;
-      proxy_set_header Connection "upgrade";
 spec:
   ingressClassName: nginx
   tls:
