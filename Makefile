@@ -14,6 +14,7 @@ KIND_CLUSTER ?= wealist
 LOCAL_REGISTRY ?= localhost:5001
 K8S_NAMESPACE ?= wealist-dev
 IMAGE_TAG ?= latest
+LOCAL_DOMAIN ?= local.wealist.co.kr
 
 help:
 	@echo "Wealist Project"
@@ -29,8 +30,9 @@ help:
 	@echo "    make kind-apply       - 3. Deploy all to k8s (localhost)"
 	@echo "    make kind-delete      - Delete cluster"
 	@echo ""
-	@echo "  Kubernetes (Local - local.wealist.co.kr):"
-	@echo "    make local-kind-apply - Deploy with local.wealist.co.kr domain"
+	@echo "  Kubernetes (Local - Custom Domain):"
+	@echo "    make local-kind-apply                       - Deploy with local.wealist.co.kr (default)"
+	@echo "    make local-kind-apply LOCAL_DOMAIN=<domain> - Deploy with custom domain"
 	@echo "    (Uses same cluster/images as kind-*, only ingress host differs)"
 	@echo ""
 	@echo "  Per-Service Commands:"
@@ -114,26 +116,26 @@ kind-delete:
 # Only difference: ingress uses host: local.wealist.co.kr with TLS
 
 local-tls-secret:
-	@echo "=== Creating TLS secret for local.wealist.co.kr ==="
+	@echo "=== Creating TLS secret for $(LOCAL_DOMAIN) ==="
 	@if kubectl get secret local-wealist-tls -n $(K8S_NAMESPACE) >/dev/null 2>&1; then \
-		echo "TLS secret already exists, skipping..."; \
-	else \
-		echo "Generating self-signed certificate..."; \
-		openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-			-keyout /tmp/local-wealist-tls.key \
-			-out /tmp/local-wealist-tls.crt \
-			-subj "/CN=local.wealist.co.kr/O=wealist" \
-			-addext "subjectAltName=DNS:local.wealist.co.kr"; \
-		kubectl create secret tls local-wealist-tls \
-			--cert=/tmp/local-wealist-tls.crt \
-			--key=/tmp/local-wealist-tls.key \
-			-n $(K8S_NAMESPACE); \
-		rm -f /tmp/local-wealist-tls.key /tmp/local-wealist-tls.crt; \
-		echo "✅ TLS secret created"; \
+		echo "TLS secret already exists, deleting to recreate for new domain..."; \
+		kubectl delete secret local-wealist-tls -n $(K8S_NAMESPACE); \
 	fi
+	@echo "Generating self-signed certificate for $(LOCAL_DOMAIN)..."
+	@openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+		-keyout /tmp/local-wealist-tls.key \
+		-out /tmp/local-wealist-tls.crt \
+		-subj "/CN=$(LOCAL_DOMAIN)/O=wealist" \
+		-addext "subjectAltName=DNS:$(LOCAL_DOMAIN)"
+	@kubectl create secret tls local-wealist-tls \
+		--cert=/tmp/local-wealist-tls.crt \
+		--key=/tmp/local-wealist-tls.key \
+		-n $(K8S_NAMESPACE)
+	@rm -f /tmp/local-wealist-tls.key /tmp/local-wealist-tls.crt
+	@echo "✅ TLS secret created for $(LOCAL_DOMAIN)"
 
 local-kind-apply: local-tls-secret
-	@echo "=== Deploying to Kubernetes (local.wealist.co.kr) ==="
+	@echo "=== Deploying to Kubernetes ($(LOCAL_DOMAIN)) ==="
 	@echo ""
 	@echo "--- Deploying infrastructure ---"
 	kubectl apply -k infrastructure/overlays/develop
@@ -142,10 +144,23 @@ local-kind-apply: local-tls-secret
 	kubectl wait --namespace $(K8S_NAMESPACE) --for=condition=ready pod --selector=app=postgres --timeout=120s || true
 	kubectl wait --namespace $(K8S_NAMESPACE) --for=condition=ready pod --selector=app=redis --timeout=120s || true
 	@echo ""
-	@echo "--- Deploying services (local.wealist.co.kr) ---"
-	kubectl apply -k k8s/overlays/develop-registry-local/all-services
+	@echo "--- Deploying services ($(LOCAL_DOMAIN)) ---"
+	@# Replace placeholder with actual domain in template files
+	@sed -i.bak 's/__LOCAL_DOMAIN__/$(LOCAL_DOMAIN)/g' \
+		k8s/overlays/develop-registry-local/all-services/ingress.yaml \
+		k8s/overlays/develop-registry-local/all-services/kustomization.yaml
+	@kubectl apply -k k8s/overlays/develop-registry-local/all-services || \
+		(mv k8s/overlays/develop-registry-local/all-services/ingress.yaml.bak \
+			k8s/overlays/develop-registry-local/all-services/ingress.yaml && \
+		 mv k8s/overlays/develop-registry-local/all-services/kustomization.yaml.bak \
+			k8s/overlays/develop-registry-local/all-services/kustomization.yaml && exit 1)
+	@# Restore template files
+	@mv k8s/overlays/develop-registry-local/all-services/ingress.yaml.bak \
+		k8s/overlays/develop-registry-local/all-services/ingress.yaml
+	@mv k8s/overlays/develop-registry-local/all-services/kustomization.yaml.bak \
+		k8s/overlays/develop-registry-local/all-services/kustomization.yaml
 	@echo ""
-	@echo "✅ Done! Access: https://local.wealist.co.kr"
+	@echo "✅ Done! Access: https://$(LOCAL_DOMAIN)"
 	@echo "(Self-signed cert - browser will show warning, click 'Advanced' → 'Proceed')"
 	@echo "Check: make status"
 

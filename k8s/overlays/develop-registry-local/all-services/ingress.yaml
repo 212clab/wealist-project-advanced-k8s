@@ -21,10 +21,10 @@ spec:
   ingressClassName: nginx
   tls:
     - hosts:
-        - local.wealist.co.kr
+        - __LOCAL_DOMAIN__
       secretName: local-wealist-tls
   rules:
-    - host: local.wealist.co.kr
+    - host: __LOCAL_DOMAIN__
       http:
         paths:
           # ============================================
