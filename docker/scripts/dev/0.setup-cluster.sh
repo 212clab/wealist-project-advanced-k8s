@@ -83,6 +83,13 @@ EOF
 echo "⏳ Ingress Nginx Controller 설치 중..."
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
 
+# ingress-nginx를 control-plane 노드에서 실행하도록 설정 (포트 매핑이 control-plane에만 있음)
+echo "⚙️ Ingress Controller를 control-plane 노드로 설정 중..."
+kubectl patch deployment ingress-nginx-controller -n ingress-nginx --type='json' -p='[
+  {"op": "add", "path": "/spec/template/spec/nodeSelector", "value": {"ingress-ready": "true"}},
+  {"op": "add", "path": "/spec/template/spec/tolerations", "value": [{"key": "node-role.kubernetes.io/control-plane", "operator": "Exists", "effect": "NoSchedule"}]}
+]' 2>/dev/null || true
+
 echo "⏳ Ingress Controller 준비 대기 중..."
 kubectl wait --namespace ingress-nginx \
   --for=condition=ready pod \
