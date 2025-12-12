@@ -1,5 +1,5 @@
 .PHONY: help dev-up dev-down dev-logs kind-setup kind-load-images kind-apply kind-delete status clean
-.PHONY: local-kind-apply local-tls-secret
+.PHONY: kind-tls-secret
 .PHONY: auth-service-build auth-service-load auth-service-redeploy auth-service-all
 .PHONY: board-service-build board-service-load board-service-redeploy board-service-all
 .PHONY: chat-service-build chat-service-load chat-service-redeploy chat-service-all
@@ -14,6 +14,7 @@ KIND_CLUSTER ?= wealist
 LOCAL_REGISTRY ?= localhost:5001
 K8S_NAMESPACE ?= wealist-dev
 IMAGE_TAG ?= latest
+LOCAL_DOMAIN ?= local.wealist.co.kr
 
 help:
 	@echo "Wealist Project"
@@ -23,15 +24,12 @@ help:
 	@echo "    make dev-down     - Stop all services"
 	@echo "    make dev-logs     - View logs"
 	@echo ""
-	@echo "  Kubernetes (Local - localhost) - 3 Step Setup:"
+	@echo "  Kubernetes (Kind) - 3 Step Setup:"
 	@echo "    make kind-setup       - 1. Create cluster + registry"
 	@echo "    make kind-load-images - 2. Build/pull all images (infra + services)"
-	@echo "    make kind-apply       - 3. Deploy all to k8s (localhost)"
+	@echo "    make kind-apply       - 3. Deploy to k8s (default: local.wealist.co.kr)"
+	@echo "    make kind-apply LOCAL_DOMAIN=<domain> - Deploy with custom domain"
 	@echo "    make kind-delete      - Delete cluster"
-	@echo ""
-	@echo "  Kubernetes (Local - local.wealist.co.kr):"
-	@echo "    make local-kind-apply - Deploy with local.wealist.co.kr domain"
-	@echo "    (Uses same cluster/images as kind-*, only ingress host differs)"
 	@echo ""
 	@echo "  Per-Service Commands:"
 	@echo "    make <service>-build    - Build image only"
@@ -83,13 +81,12 @@ kind-load-images:
 	@echo ""
 	@echo "✅ All images loaded!"
 	@echo ""
-	@echo "Next step (choose one):"
-	@echo "  make kind-apply       - Deploy (localhost)"
-	@echo "  make local-kind-apply - Deploy (local.wealist.co.kr)"
+	@echo "Next: make kind-apply"
+	@echo "  (Or: make kind-apply LOCAL_DOMAIN=wonny.wealist.co.kr)"
 
 # Step 3: Deploy all to k8s
-kind-apply:
-	@echo "=== Step 3: Deploying to Kubernetes ==="
+kind-apply: kind-tls-secret
+	@echo "=== Step 3: Deploying to Kubernetes ($(LOCAL_DOMAIN)) ==="
 	@echo ""
 	@echo "--- Deploying infrastructure ---"
 	kubectl apply -k infrastructure/overlays/develop
@@ -98,56 +95,48 @@ kind-apply:
 	kubectl wait --namespace $(K8S_NAMESPACE) --for=condition=ready pod --selector=app=postgres --timeout=120s || true
 	kubectl wait --namespace $(K8S_NAMESPACE) --for=condition=ready pod --selector=app=redis --timeout=120s || true
 	@echo ""
-	@echo "--- Deploying services ---"
-	kubectl apply -k k8s/overlays/develop-registry/all-services
+	@echo "--- Deploying services ($(LOCAL_DOMAIN)) ---"
+	@# Replace placeholder with actual domain in template files
+	@sed -i.bak 's/__LOCAL_DOMAIN__/$(LOCAL_DOMAIN)/g' \
+		k8s/overlays/develop-registry/all-services/ingress.yaml \
+		k8s/overlays/develop-registry/all-services/kustomization.yaml
+	@kubectl apply -k k8s/overlays/develop-registry/all-services || \
+		(mv k8s/overlays/develop-registry/all-services/ingress.yaml.bak \
+			k8s/overlays/develop-registry/all-services/ingress.yaml && \
+		 mv k8s/overlays/develop-registry/all-services/kustomization.yaml.bak \
+			k8s/overlays/develop-registry/all-services/kustomization.yaml && exit 1)
+	@# Restore template files
+	@mv k8s/overlays/develop-registry/all-services/ingress.yaml.bak \
+		k8s/overlays/develop-registry/all-services/ingress.yaml
+	@mv k8s/overlays/develop-registry/all-services/kustomization.yaml.bak \
+		k8s/overlays/develop-registry/all-services/kustomization.yaml
 	@echo ""
-	@echo "✅ Done! Check: make status"
+	@echo "✅ Done! Access: https://$(LOCAL_DOMAIN)"
+	@echo "(Self-signed cert - browser will show warning, click 'Advanced' → 'Proceed')"
+	@echo "Check: make status"
+
+kind-tls-secret:
+	@echo "=== Creating TLS secret for $(LOCAL_DOMAIN) ==="
+	@if kubectl get secret local-wealist-tls -n $(K8S_NAMESPACE) >/dev/null 2>&1; then \
+		echo "TLS secret already exists, deleting to recreate for new domain..."; \
+		kubectl delete secret local-wealist-tls -n $(K8S_NAMESPACE); \
+	fi
+	@echo "Generating self-signed certificate for $(LOCAL_DOMAIN)..."
+	@openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+		-keyout /tmp/local-wealist-tls.key \
+		-out /tmp/local-wealist-tls.crt \
+		-subj "/CN=$(LOCAL_DOMAIN)/O=wealist" \
+		-addext "subjectAltName=DNS:$(LOCAL_DOMAIN)"
+	@kubectl create secret tls local-wealist-tls \
+		--cert=/tmp/local-wealist-tls.crt \
+		--key=/tmp/local-wealist-tls.key \
+		-n $(K8S_NAMESPACE)
+	@rm -f /tmp/local-wealist-tls.key /tmp/local-wealist-tls.crt
+	@echo "✅ TLS secret created for $(LOCAL_DOMAIN)"
 
 kind-delete:
 	kind delete cluster --name $(KIND_CLUSTER)
 	@docker rm -f kind-registry 2>/dev/null || true
-
-# =============================================================================
-# Kubernetes (Local - local.wealist.co.kr)
-# =============================================================================
-# Uses same cluster and images as kind-* commands
-# Only difference: ingress uses host: local.wealist.co.kr with TLS
-
-local-tls-secret:
-	@echo "=== Creating TLS secret for local.wealist.co.kr ==="
-	@if kubectl get secret local-wealist-tls -n $(K8S_NAMESPACE) >/dev/null 2>&1; then \
-		echo "TLS secret already exists, skipping..."; \
-	else \
-		echo "Generating self-signed certificate..."; \
-		openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-			-keyout /tmp/local-wealist-tls.key \
-			-out /tmp/local-wealist-tls.crt \
-			-subj "/CN=local.wealist.co.kr/O=wealist" \
-			-addext "subjectAltName=DNS:local.wealist.co.kr"; \
-		kubectl create secret tls local-wealist-tls \
-			--cert=/tmp/local-wealist-tls.crt \
-			--key=/tmp/local-wealist-tls.key \
-			-n $(K8S_NAMESPACE); \
-		rm -f /tmp/local-wealist-tls.key /tmp/local-wealist-tls.crt; \
-		echo "✅ TLS secret created"; \
-	fi
-
-local-kind-apply: local-tls-secret
-	@echo "=== Deploying to Kubernetes (local.wealist.co.kr) ==="
-	@echo ""
-	@echo "--- Deploying infrastructure ---"
-	kubectl apply -k infrastructure/overlays/develop
-	@echo ""
-	@echo "Waiting for infra pods..."
-	kubectl wait --namespace $(K8S_NAMESPACE) --for=condition=ready pod --selector=app=postgres --timeout=120s || true
-	kubectl wait --namespace $(K8S_NAMESPACE) --for=condition=ready pod --selector=app=redis --timeout=120s || true
-	@echo ""
-	@echo "--- Deploying services (local.wealist.co.kr) ---"
-	kubectl apply -k k8s/overlays/develop-registry-local/all-services
-	@echo ""
-	@echo "✅ Done! Access: https://local.wealist.co.kr"
-	@echo "(Self-signed cert - browser will show warning, click 'Advanced' → 'Proceed')"
-	@echo "Check: make status"
 
 # =============================================================================
 # Per-Service Commands
