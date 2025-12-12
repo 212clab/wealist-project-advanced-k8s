@@ -259,15 +259,18 @@ export const VideoRoom: React.FC<VideoRoomProps> = ({
         setConnectionState('connected');
         updateParticipants();
 
-        // Set participant metadata (profile info)
+        // Set participant metadata (profile info) - non-blocking
+        // Metadata is optional, so don't fail connection if it times out
         if (userProfile) {
           const metadata: ParticipantMetadata = {
             id: userProfile.id,
             nickName: userProfile.nickName,
             profileImageUrl: userProfile.profileImageUrl,
           };
-          await room.localParticipant.setMetadata(JSON.stringify(metadata));
-          console.log('[VideoRoom] Set participant metadata:', metadata);
+          room.localParticipant
+            .setMetadata(JSON.stringify(metadata))
+            .then(() => console.log('[VideoRoom] Set participant metadata:', metadata))
+            .catch((e) => console.warn('[VideoRoom] Failed to set metadata (non-critical):', e));
         }
 
         // Publish initial state (Audio default on if available, Video off)

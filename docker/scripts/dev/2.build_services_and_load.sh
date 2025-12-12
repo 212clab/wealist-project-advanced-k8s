@@ -9,7 +9,7 @@ set -e
 REG_PORT="5001"
 LOCAL_REG="localhost:${REG_PORT}"
 TAG="${IMAGE_TAG:-latest}"  # 환경변수로 오버라이드 가능, 기본값 latest
-MAX_PARALLEL="${MAX_PARALLEL:-4}"  # 동시 빌드 수 (기본 4)
+MAX_PARALLEL="${MAX_PARALLEL:-2}"  # 동시 빌드 수 (기본 2, 리소스 경쟁 줄이기)
 
 # 색상 출력
 RED='\033[0;31m'
@@ -41,16 +41,17 @@ echo ""
 TEMP_DIR=$(mktemp -d)
 trap "rm -rf $TEMP_DIR" EXIT
 
-# 서비스 정보 배열
+# 서비스 정보 배열 (빠른 빌드 먼저)
+# 순서: frontend(npm) → Go 서비스들 → auth-service(Gradle, 느림)
 declare -a SERVICES=(
-    "auth-service|services/auth-service|Dockerfile"
-    "board-service|services/board-service|docker/Dockerfile"
-    "chat-service|.|services/chat-service/docker/Dockerfile"
     "frontend|services/frontend|Dockerfile"
+    "video-service|services/video-service|docker/Dockerfile"
+    "board-service|services/board-service|docker/Dockerfile"
     "noti-service|services/noti-service|docker/Dockerfile"
     "storage-service|services/storage-service|docker/Dockerfile"
+    "chat-service|.|services/chat-service/docker/Dockerfile"
     "user-service|.|services/user-service/docker/Dockerfile"
-    "video-service|services/video-service|docker/Dockerfile"
+    "auth-service|services/auth-service|Dockerfile"
 )
 
 # 빌드할 서비스 선택

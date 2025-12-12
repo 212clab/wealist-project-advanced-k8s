@@ -13,7 +13,7 @@ data:
       node_ip: "127.0.0.1"
 
     keys:
-      devkey: secret
+      devkey: devsecretkey1234567890abcdefghijk
 
     logging:
       level: info

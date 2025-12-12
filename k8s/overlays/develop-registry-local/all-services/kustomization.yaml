@@ -159,3 +159,12 @@ patches:
       - op: replace
         path: /data/S3_PUBLIC_ENDPOINT
         value: "https://local.wealist.co.kr/minio"
+
+  # Video service: LiveKit WebSocket URL for local.wealist.co.kr domain
+  - target:
+      kind: ConfigMap
+      name: video-service-config
+    patch: |-
+      - op: replace
+        path: /data/LIVEKIT_WS_URL
+        value: "wss://local.wealist.co.kr/svc/livekit"
