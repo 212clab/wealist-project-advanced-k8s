@@ -860,7 +860,7 @@ flowchart TD
     end
 
     subgraph Internal["내부 통신"]
-        I1[/api/internal/*]
+        I1["/api/internal/*"]
         I2[API Key 인증]
         I3[서비스 간 직접 호출]
     end
@@ -912,14 +912,14 @@ flowchart TD
     NGINX --> STORAGE
     NGINX --> VIDEO
 
-    AUTH -->|OAuth Login| USER
+    AUTH -->|"OAuth Login"| USER
     AUTH --> REDIS
 
-    BOARD -->|User 확인| USER
-    BOARD -->|알림 생성| NOTI
+    BOARD -->|"User Check"| USER
+    BOARD -->|"Notification"| NOTI
     BOARD --> PG
 
-    CHAT -->|알림 생성| NOTI
+    CHAT -->|"Notification"| NOTI
     CHAT --> PG
     CHAT --> REDIS
 
