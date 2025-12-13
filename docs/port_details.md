@@ -9,6 +9,8 @@
 - [LiveKit 포트 상세](#livekit-포트-상세)
 - [WebSocket vs LiveKit 비교](#websocket-vs-livekit-비교)
 - [네트워크 흐름](#네트워크-흐름)
+- [Kubernetes 포트 설정](#kubernetes-포트-설정)
+- [Kind 클러스터 설정](#kind-클러스터-설정)
 
 ---
 
@@ -356,3 +358,210 @@ loki:                "3100:3100"
 3478/udp
 3478/tcp
 ```
+
+---
+
+## Kubernetes 포트 설정
+
+### Service 타입 이해
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Kubernetes Service Types                  │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ClusterIP (기본값)                                          │
+│  ├── 클러스터 내부에서만 접근 가능                            │
+│  ├── Pod간 통신에 사용                                       │
+│  └── 예: postgres:5432, redis:6379                          │
+│                                                             │
+│  NodePort                                                   │
+│  ├── 클러스터 외부에서 접근 가능                             │
+│  ├── 모든 노드의 특정 포트로 노출 (30000-32767)              │
+│  └── 예: livekit-external:30880                             │
+│                                                             │
+│  LoadBalancer                                               │
+│  ├── 클라우드 환경에서 외부 로드밸런서 생성                   │
+│  ├── AWS ALB/NLB, GCP Load Balancer 등                      │
+│  └── 프로덕션 환경에서 권장                                  │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### port vs targetPort vs nodePort
+
+```yaml
+spec:
+  type: NodePort
+  ports:
+    - port: 7880         # Service 포트 (클러스터 내부)
+      targetPort: 7880   # Pod 포트 (컨테이너)
+      nodePort: 30880    # Node 포트 (외부 접근)
+```
+
+```
+외부 요청 흐름:
+  Client → Node:30880 → Service:7880 → Pod:7880
+
+내부 요청 흐름:
+  다른 Pod → Service:7880 → Pod:7880
+```
+
+### LiveKit Kubernetes Services
+
+```yaml
+# 파일: infrastructure/base/livekit/service.yaml
+
+# 1. ClusterIP Service (내부 통신용)
+apiVersion: v1
+kind: Service
+metadata:
+  name: livekit
+spec:
+  type: ClusterIP
+  ports:
+    - port: 7880      # HTTP API + WebSocket
+    - port: 7881      # RTC TCP
+    - port: 3478/UDP  # TURN UDP
+    - port: 3478/TCP  # TURN TCP
+
+# 2. NodePort Service (외부 WebRTC용)
+apiVersion: v1
+kind: Service
+metadata:
+  name: livekit-external
+spec:
+  type: NodePort
+  ports:
+    - port: 7880, nodePort: 30880  # HTTP
+    - port: 7881, nodePort: 30881  # RTC TCP
+    - port: 3478, nodePort: 30478  # TURN UDP
+    - port: 3478, nodePort: 30479  # TURN TCP
+```
+
+---
+
+## Kind 클러스터 설정
+
+### Kind의 포트 노출 제한
+
+Kind(Kubernetes in Docker)는 Docker 컨테이너 내에서 K8s를 실행하므로:
+- 포트 범위(50000-60000) 매핑이 어려움
+- 각 포트를 명시적으로 선언해야 함
+- UDP 포트 범위 노출에 제한
+
+### TCP 전용 모드 (Kind 환경)
+
+UDP 포트 범위 제한을 우회하기 위해 TCP 전용 모드 사용:
+
+```yaml
+# 파일: infrastructure/base/livekit/configmap.yaml
+
+rtc:
+  tcp_port: 7881
+  use_external_ip: true
+  node_ip: "공인IP"           # 라우터 포트포워딩 대상 IP
+  port_range_start: 7881      # UDP 비활성화 (TCP와 동일하게)
+  port_range_end: 7881
+
+turn:
+  enabled: true
+  udp_port: 3478
+  tcp_port: 3478
+```
+
+### Kind extraPortMappings
+
+```yaml
+# 파일: docker/scripts/dev/kind-config.yaml
+
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      # Ingress (Nginx)
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP
+
+      # LiveKit WebRTC TCP
+      - containerPort: 7881
+        hostPort: 7881
+        protocol: TCP
+
+      # LiveKit TURN UDP
+      - containerPort: 3478
+        hostPort: 3478
+        protocol: UDP
+
+      # LiveKit TURN TCP (UDP 차단 환경용)
+      - containerPort: 3478
+        hostPort: 3478
+        protocol: TCP
+```
+
+### 외부 접근 흐름 (Kind + WSL)
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    외부 접근 흐름 (Kind + WSL)                       │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Internet                                                           │
+│      │                                                              │
+│      ▼                                                              │
+│  공유기 (포트포워딩)                                                 │
+│  ├── 7880 → 192.168.x.x:7880 (HTTP/WS 시그널링)                    │
+│  ├── 7881 → 192.168.x.x:7881 (RTC TCP)                             │
+│  └── 3478 → 192.168.x.x:3478 (TURN UDP/TCP)                        │
+│      │                                                              │
+│      ▼                                                              │
+│  호스트 PC (Windows)                                                │
+│      │                                                              │
+│      ▼                                                              │
+│  WSL2 (포트 자동 포워딩)                                            │
+│      │                                                              │
+│      ▼                                                              │
+│  Kind Docker Container                                              │
+│  └── extraPortMappings                                              │
+│      │                                                              │
+│      ▼                                                              │
+│  Kubernetes Cluster                                                 │
+│  └── NodePort Service (livekit-external)                            │
+│      │                                                              │
+│      ▼                                                              │
+│  LiveKit Pod                                                        │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### 클러스터 재생성 방법
+
+```bash
+# 1. 기존 클러스터 삭제
+make kind-delete
+
+# 2. 새 클러스터 생성 (kind-config.yaml의 extraPortMappings 적용)
+make kind-setup
+
+# 3. 이미지 로드
+make kind-load-images
+
+# 4. 배포 (ConfigMap 포함)
+make kind-apply
+
+# 상태 확인
+make status
+kubectl get configmap livekit-config -n wealist-dev -o yaml
+```
+
+### TCP vs UDP 성능 차이
+
+| 환경 | 모드 | 지연시간 | 품질 | 권장 |
+|------|------|----------|------|------|
+| Kind (개발) | TCP only | 50-100ms | 보통 | ✓ |
+| EKS (프로덕션) | UDP + TCP fallback | 20-50ms | 최상 | ✓ |
+
+개발 환경에서는 TCP 전용 모드로도 충분하며, 프로덕션(EKS)에서는 UDP 포트 범위를 열어 최적 성능을 확보합니다.
