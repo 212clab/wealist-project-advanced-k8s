@@ -78,7 +78,7 @@ patches:
         value: "https://__PUBLIC_DOMAIN__/oauth/callback"
       - op: replace
         path: /data/OAUTH2_CLIENT_REDIRECT_URI
-        value: "https://__PUBLIC_DOMAIN__/login/oauth2/code/google"
+        value: "https://__PUBLIC_DOMAIN__/oauth2/callback/google"
 
   # Chat service: Add SERVER_BASE_PATH for ingress routing
   - target:
@@ -158,7 +158,7 @@ patches:
         path: /data/S3_PUBLIC_ENDPOINT
         value: "https://__PUBLIC_DOMAIN__/minio"
 
-  # Video service: LiveKit WebSocket URL for custom domain
+  # Video service: LiveKit WebSocket URL for custom domain (through CloudFront)
   - target:
       kind: ConfigMap
       name: video-service-config
@@ -166,3 +166,34 @@ patches:
       - op: replace
         path: /data/LIVEKIT_WS_URL
         value: "wss://__PUBLIC_DOMAIN__/svc/livekit"
+
+  # LiveKit: Configure for external access with API domain
+  # This patches the livekit.yaml embedded in the ConfigMap
+  - target:
+      kind: ConfigMap
+      name: livekit-config
+    patch: |-
+      - op: replace
+        path: /data/livekit.yaml
+        value: |
+          port: 7880
+          rtc:
+            port_range_start: 50000
+            port_range_end: 60000
+            tcp_port: 7881
+            # For NAT/firewall environments, use external IP detection
+            use_external_ip: true
+            enable_loopback_candidate: false
+          keys:
+            devkey: devsecretkey1234567890abcdefghijk
+          logging:
+            level: debug
+            json: false
+          room:
+            empty_timeout: 300
+            max_participants: 100
+          turn:
+            enabled: true
+            domain: __API_DOMAIN__
+            tls_port: 0
+            udp_port: 3478
