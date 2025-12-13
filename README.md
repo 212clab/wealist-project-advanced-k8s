@@ -21,7 +21,7 @@ make kind-load-images
 
 # 3. 배포
 make kind-apply                                   # 기본: local.wealist.co.kr
-make kind-apply LOCAL_DOMAIN=wonny.wealist.co.kr  # 커스텀 도메인
+make kind-apply LOCAL_DOMAIN=dev.wealist.co.kr  # 커스텀 도메인
 ```
 
 > 자세한 내용은 [NOTE.md](./NOTE.md) 참고
@@ -47,16 +47,16 @@ make kind-apply LOCAL_DOMAIN=wonny.wealist.co.kr  # 커스텀 도메인
 
 ## 주요 명령어
 
-| 명령어 | 설명 |
-|--------|------|
-| `make help` | 사용 가능한 명령어 확인 |
-| `make kind-setup` | Kind 클러스터 생성 |
-| `make kind-load-images` | 이미지 빌드 및 로드 |
-| `make kind-apply` | K8s 배포 (기본 도메인) |
-| `make kind-apply LOCAL_DOMAIN=<도메인>` | 커스텀 도메인으로 배포 |
-| `make kind-delete` | 클러스터 삭제 |
-| `make status` | Pod 상태 확인 |
-| `make <서비스>-all` | 개별 서비스 재배포 |
+| 명령어                                  | 설명                    |
+| --------------------------------------- | ----------------------- |
+| `make help`                             | 사용 가능한 명령어 확인 |
+| `make kind-setup`                       | Kind 클러스터 생성      |
+| `make kind-load-images`                 | 이미지 빌드 및 로드     |
+| `make kind-apply`                       | K8s 배포 (기본 도메인)  |
+| `make kind-apply LOCAL_DOMAIN=<도메인>` | 커스텀 도메인으로 배포  |
+| `make kind-delete`                      | 클러스터 삭제           |
+| `make status`                           | Pod 상태 확인           |
+| `make <서비스>-all`                     | 개별 서비스 재배포      |
 
 ## 환경별 접속 정보
 

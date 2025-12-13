@@ -15,6 +15,7 @@
 ### 사전 준비
 
 1. **Secret 파일 생성** (최초 1회)
+
    ```bash
    # 템플릿 복사
    cp k8s/base/namespace-dev/secret.yaml.example k8s/base/namespace-dev/secret.yaml
@@ -41,16 +42,16 @@ make kind-load-images
 
 # 3. 배포 (도메인 선택)
 make kind-apply                                   # 기본: local.wealist.co.kr
-make kind-apply LOCAL_DOMAIN=wonny.wealist.co.kr  # 커스텀 도메인
+make kind-apply LOCAL_DOMAIN=dev.wealist.co.kr  # 커스텀 도메인
 ```
 
-### 예시: wonny.wealist.co.kr로 배포
+### 예시: dev.wealist.co.kr로 배포
 
 ```bash
 # CNAME/A 레코드 등록 후 아래 명령어 실행
-make kind-apply LOCAL_DOMAIN=wonny.wealist.co.kr
+make kind-apply LOCAL_DOMAIN=dev.wealist.co.kr
 
-# 접속: http://wonny.wealist.co.kr (CDN 사용 시 https)
+# 접속: http://dev.wealist.co.kr (CDN 사용 시 https)
 ```
 
 ---
