@@ -7,10 +7,12 @@ data:
     port: 7880
     rtc:
       port_range_start: 50000
-      port_range_end: 60000
+      port_range_end: 50100
       tcp_port: 7881
+      # Kind/Docker 환경에서는 use_external_ip가 제대로 동작 안 할 수 있음
+      # node_ip를 명시적으로 설정
       use_external_ip: false
-      node_ip: "127.0.0.1"
+      node_ip: "192.168.45.2"
 
     keys:
       devkey: devsecretkey1234567890abcdefghijk
@@ -25,6 +27,8 @@ data:
 
     turn:
       enabled: true
-      domain: local.wealist.co.kr
+      domain: dev.wealist.co.kr
       tls_port: 0
       udp_port: 3478
+      # TCP fallback (UDP 차단 환경용)
+      tcp_port: 3478
